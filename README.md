@@ -2,6 +2,27 @@
 
 This app was entirely vibecoded to solve a very niche problem; syncing an entire media library comprised of music, video, podcasts and audiobooks to an iPod Classic through modern means. Apple Music/Finder is finnicky at best as of today and other solutions out there make compromises to the syncing process that make it arduous and prone to failure. While I appreciate the efforts of those other attempts, it never worked well for me. So I threw the problem at an LLM and let it spin up this as a result. It's very niched for how I personally sort my music library so it might need some readjustments on your own end if you decide to use this.
 
+That said, being vibecoded didn't mean going "computahhh... make itunes again". An LLM is pretty bad at understanding human UX. So, a lot of pre-design went into that so that it would get the actual feel of use right. Anyway. Here's some screenshots:
+
+<table>
+  <tr>
+    <td><a href="https://github.com/user-attachments/assets/0692dbdc-6dff-405e-8bcb-802e708e401e"><img width="260" alt="iSyncer screenshot 1" src="https://github.com/user-attachments/assets/0692dbdc-6dff-405e-8bcb-802e708e401e"></a></td>
+    <td><a href="https://github.com/user-attachments/assets/a16b34f8-7af6-438a-b217-f4bb184f3964"><img width="260" alt="iSyncer screenshot 2" src="https://github.com/user-attachments/assets/a16b34f8-7af6-438a-b217-f4bb184f3964"></a></td>
+    <td><a href="https://github.com/user-attachments/assets/30a93c5e-fde8-43ca-b0f8-b8e782a91c70"><img width="260" alt="iSyncer screenshot 3" src="https://github.com/user-attachments/assets/30a93c5e-fde8-43ca-b0f8-b8e782a91c70"></a></td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/user-attachments/assets/6d193883-bd0a-4d85-8bcb-0f818c6a10d9"><img width="260" alt="iSyncer screenshot 4" src="https://github.com/user-attachments/assets/6d193883-bd0a-4d85-8bcb-0f818c6a10d9"></a></td>
+    <td><a href="https://github.com/user-attachments/assets/6830ec4f-5182-4f6a-935e-974b1907784b"><img width="260" alt="iSyncer screenshot 5" src="https://github.com/user-attachments/assets/6830ec4f-5182-4f6a-935e-974b1907784b"></a></td>
+    <td><a href="https://github.com/user-attachments/assets/33689785-1b29-428b-9acb-4ad9b83e10c5"><img width="260" alt="iSyncer screenshot 6" src="https://github.com/user-attachments/assets/33689785-1b29-428b-9acb-4ad9b83e10c5"></a></td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/user-attachments/assets/3b94063f-2db0-4f8b-96f5-608d229e8dcd"><img width="260" alt="iSyncer screenshot 7" src="https://github.com/user-attachments/assets/3b94063f-2db0-4f8b-96f5-608d229e8dcd"></a></td>
+    <td><a href="https://github.com/user-attachments/assets/c892cc8a-b36d-41f0-8692-653e09274ea1"><img width="260" alt="iSyncer screenshot 8" src="https://github.com/user-attachments/assets/c892cc8a-b36d-41f0-8692-653e09274ea1"></a></td>
+<td><a href="https://github.com/user-attachments/assets/68e4dbee-499a-4510-b378-bb8921a3ec8b"><img width="260" alt="iSyncer screenshot 9" src="https://github.com/user-attachments/assets/68e4dbee-499a-4510-b378-bb8921a3ec8b"></a></td>
+  </tr>
+</table>
+
+
 # iSyncer
 
 iSyncer is a native macOS media library and USB sync app for the iPod Classic running Apple firmware. It brings back the iTunes-era column browser, brushed-metal controls, and device summary, with playback for music, videos, podcasts, and audiobooks.
