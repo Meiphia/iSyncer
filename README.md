@@ -1,3 +1,7 @@
+# Human-written introduction
+
+This app was entirely vibecoded to solve a very niche problem; syncing an entire media library comprised of music, video, podcasts and audiobooks to an iPod Classic through modern means. Apple Music/Finder is finnicky at best as of today and other solutions out there make compromises to the syncing process that make it arduous and prone to failure. While I appreciate the efforts of those other attempts, it never worked well for me. So I threw the problem at an LLM and let it spin up this as a result. It's very niched for how I personally sort my music library so it might need some readjustments on your own end if you decide to use this.
+
 # iSyncer
 
 iSyncer is a native macOS media library and USB sync app for the iPod Classic running Apple firmware. It brings back the iTunes-era column browser, brushed-metal controls, and device summary, with playback for music, videos, podcasts, and audiobooks.
