@@ -1,0 +1,8 @@
+{
+  "name": "isyncer-artwork-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bash scripts/build.sh"
+  }
+}

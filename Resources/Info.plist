@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>iSyncer</string>
+    <key>CFBundleIconFile</key><string>iSyncer.icns</string>
+    <key>CFBundleIdentifier</key><string>com.jaz.isyncer</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>iSyncer</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.5.30</string>
+    <key>CFBundleVersion</key><string>37</string>
+    <key>DiscordArtworkRelayOrigin</key><string>https://isyncer-artwork-relay.funnynashi4.chatgpt.site</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>iSyncer reads your music folders and syncs selected tracks to your iPod Classic.</string>
+</dict>
+</plist>
