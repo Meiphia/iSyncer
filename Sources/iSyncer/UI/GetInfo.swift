@@ -20,7 +20,7 @@ final class GetInfoController: NSObject, NSWindowDelegate {
         w.isReleasedWhenClosed = false
         w.appearance = NSAppearance(named: .aqua)
         w.delegate = self
-        w.contentView = NSHostingView(rootView: GetInfoView(model: model) { [weak w] in w?.close() })
+        w.contentView = NSHostingView(rootView: GetInfoView(model: model) { [weak w] in w?.close() }.interfaceTypography())
         model.onTitle = { [weak w] title in w?.title = title }
         model.onTitle?(model.windowTitle)
         w.center()
@@ -262,6 +262,7 @@ final class GetInfoModel: ObservableObject {
 
 @MainActor
 struct GetInfoView: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var model: GetInfoModel
     let close: () -> Void
     @State private var tab = "Info"
@@ -296,7 +297,7 @@ struct GetInfoView: View {
             .padding(.horizontal, 18)
 
             if let err = model.error {
-                Text(err).font(.system(size: 11)).foregroundStyle(.red)
+                Text(err).font(.system(size: 11 + textSize.extra)).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18).padding(.bottom, 4)
             }
@@ -314,7 +315,7 @@ struct GetInfoView: View {
             artworkBox(size: 120)
             VStack(alignment: .leading, spacing: 4) {
                 if let t = model.first, !model.isMulti {
-                    Text(t.title).font(.system(size: 14, weight: .semibold))
+                    Text(t.title).font(.system(size: 14 + textSize.extra, weight: .semibold))
                     Text(t.artist).foregroundStyle(.secondary)
                     Text(t.album).foregroundStyle(.secondary)
                     Divider().padding(.vertical, 4)
@@ -328,7 +329,7 @@ struct GetInfoView: View {
                     row("Plays", t.playCount > 0 ? "\(t.playCount), last \(date(t.lastPlayed))" : "Never")
                     row("Where", t.id)
                 } else {
-                    Text("\(ts.count) songs").font(.system(size: 14, weight: .semibold))
+                    Text("\(ts.count) songs").font(.system(size: 14 + textSize.extra, weight: .semibold))
                     Divider().padding(.vertical, 4)
                     row("Total Time", Format.duration(ts.reduce(0) { $0 + $1.duration }))
                     row("Total Size", Format.bytes(ts.reduce(Int64(0)) { $0 + $1.size }))
@@ -336,10 +337,10 @@ struct GetInfoView: View {
                 }
                 if !model.editable {
                     Text("Some of these files can't be edited (only MP3, AAC/ALAC, FLAC, Ogg and Opus).")
-                        .font(.system(size: 10)).foregroundStyle(.orange).padding(.top, 6)
+                        .font(.system(size: 10 + textSize.extra)).foregroundStyle(.orange).padding(.top, 6)
                 }
             }
-            .font(.system(size: 11))
+            .font(.system(size: 11 + textSize.extra))
         }
     }
 
@@ -388,13 +389,13 @@ struct GetInfoView: View {
             GridRow(alignment: .top) {
                 label("Comments")
                 TextEditor(text: model.binding(.comment))
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 + textSize.extra))
                     .frame(height: 56)
                     .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.secondary.opacity(0.4)))
                     .gridCellColumns(3)
             }
         }
-        .font(.system(size: 11))
+        .font(.system(size: 11 + textSize.extra))
         .disabled(!model.editable || model.saving)
     }
 
@@ -429,7 +430,7 @@ struct GetInfoView: View {
                 .disabled(plays == 0)
             }
         }
-        .font(.system(size: 11))
+        .font(.system(size: 11 + textSize.extra))
         .padding(.top, 8)
     }
 
@@ -450,7 +451,7 @@ struct GetInfoView: View {
                 Button("Delete") { model.clearArtwork() }.disabled(model.artwork == nil)
             }
             Text(model.isMulti ? "The new artwork goes into every selected song." : "Drop an image here, or choose one.")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .font(.system(size: 10 + textSize.extra)).foregroundStyle(.secondary)
         }
         .disabled(!model.editable || model.saving)
         .frame(maxWidth: .infinity)
@@ -464,7 +465,7 @@ struct GetInfoView: View {
             }
             if model.saving {
                 ProgressView().controlSize(.small).padding(.leading, 6)
-                if !model.progress.isEmpty { Text("Saving \(model.progress)").font(.system(size: 11)).foregroundStyle(.secondary) }
+                if !model.progress.isEmpty { Text("Saving \(model.progress)").font(.system(size: 11 + textSize.extra)).foregroundStyle(.secondary) }
             }
             Spacer()
             Button("Cancel") { close() }

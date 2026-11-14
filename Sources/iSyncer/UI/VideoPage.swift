@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// Videos library: what was found, how it'll be laid out on the device, and checkboxes.
 @MainActor
 struct VideoPage: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var library: LibraryStore
     let search: String
     @ObservedObject private var history = VideoWatchHistory.shared
@@ -14,6 +15,7 @@ struct VideoPage: View {
     @State private var playing: VideoItem?
     @State private var posterShow: String?
     @State private var posterSeason: Int?
+    @State private var collapsedPosterSeasons: [String: Set<Int>] = [:]
     @State private var selection = Set<VideoItem.ID>()
     @State private var editing: VideoItem?
     @State private var metadataBatch: TVMetadataBatch?
@@ -21,6 +23,7 @@ struct VideoPage: View {
     // Column browser: Category → Show / Movie / Folder → Season
     @State private var category: String?
     @State private var group: String?
+    @State private var organization: EpisodeOrganization?
     @State private var season: String?
     @AppStorage("videoBrowserHeight") private var browserHeight: Double = 150
 
@@ -93,6 +96,9 @@ struct VideoPage: View {
                     }
                 }
             }
+            .sheet(item: $organization) { value in
+                OrganizeSeasonSheet(library: library, organization: value)
+            }
             .sheet(item: $editing) { video in
                 if let url = library.url(forVideo: video) {
                     VideoInfoSheet(library: library, video: video, url: url)
@@ -120,15 +126,17 @@ struct VideoPage: View {
 
     private var searched: [VideoItem] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        let videos = library.videos.filter { !unwatched || !watchState($0).watched }.map { video in
-            var item = video
-            if let url = library.url(forVideo: item), let title = library.videoMetadata(for: url)?.title {
-                item.title = title
-            }
-            return item
-        }
+        let videos = library.videos.filter { !unwatched || !watchState($0).watched }.map(displayVideo)
         guard !q.isEmpty else { return videos }
         return videos.filter { ($0.title + " " + $0.show + " " + $0.id).lowercased().contains(q) }
+    }
+
+    private func displayVideo(_ video: VideoItem) -> VideoItem {
+        var item = video
+        if let url = library.url(forVideo: item), let title = library.videoMetadata(for: url)?.title {
+            item.title = title
+        }
+        return item
     }
 
     private var byCategory: [VideoItem] {
@@ -219,7 +227,7 @@ struct VideoPage: View {
             }.width(min: 55, ideal: 70, max: 90)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
-        .font(.system(size: 11))
+        .font(.system(size: 11 + textSize.extra))
         .contextMenu(forSelectionType: VideoItem.ID.self) { ids in
             if !ids.isEmpty {
                 Button("Play") { open(ids) }.disabled(ids.count != 1)
@@ -232,6 +240,7 @@ struct VideoPage: View {
                 let episodes = library.videos.filter { ids.contains($0.id) }
                 if let first = episodes.first, first.kind == .tv, !first.show.isEmpty,
                    episodes.allSatisfy({ $0.kind == .tv && $0.show == first.show }) {
+                    Button("Organize Season…") { organization = EpisodeOrganization(episodes: episodes) }
                     Menu("Find Metadata") {
                         if episodes.allSatisfy({ $0.season == first.season }) {
                             Button(first.season == 0 ? "Specials…" : "Season \(first.season)…") {
@@ -317,6 +326,11 @@ struct VideoPage: View {
                         Button("Find Show Metadata…") {
                             if let first = shows[show]?.first { startMetadataBatch(for: first, season: nil) }
                         }.disabled(shows[show]?.isEmpty != false)
+                        if let season = posterSeason {
+                            Button("Organize Season…") {
+                                organization = EpisodeOrganization(episodes: (shows[show] ?? []).filter { $0.season == season })
+                            }
+                        }
                         Picker("Season", selection: $posterSeason) {
                             Text("All Seasons").tag(nil as Int?)
                             ForEach(Set((shows[show] ?? []).map(\.season)).sorted(), id: \.self) { season in
@@ -324,26 +338,9 @@ struct VideoPage: View {
                             }
                         }.fixedSize()
                     }
-                    let episodes = (shows[show] ?? []).filter { posterSeason == nil || $0.season == posterSeason }
-                        .sorted(by: VideoItem.episodeOrder)
-                    if episodes.isEmpty {
-                        ContentUnavailableView("No Matching Episodes", systemImage: "tv")
-                    }
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(episodes.enumerated()), id: \.element.id) { index, episode in
-                            Button { playing = episode } label: {
-                                HStack {
-                                    VideoPreviewDetails(video: episode, url: library.url(forVideo: episode), revision: library.videoMetadataRevision)
-                                    if watchState(episode).watched { Image(systemName: "checkmark.circle.fill").foregroundStyle(.blue) }
-                                    else if watchState(episode).fraction > 0 {
-                                        ProgressView(value: watchState(episode).fraction).frame(width: 45)
-                                    }
-                                }.contentShape(Rectangle()).padding(6)
-                            }.buttonStyle(.plain)
-                                .background(index.isMultiple(of: 2) ? Color.white : Theme.hex(0xEDF2F9))
-                                .contextMenu { posterMenu(episode) }
-                        }
-                    }
+                    .padding(.horizontal, 12)
+                    posterUpNext(for: show)
+                    posterEpisodes(shows[show] ?? [], show: show)
                 } else {
                     if !inProgress.isEmpty {
                         Text("Continue Watching").font(.headline)
@@ -371,8 +368,121 @@ struct VideoPage: View {
                         }
                     }
                 }
-            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, posterShow == nil ? 12 : 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }.background(.white)
+    }
+
+    @ViewBuilder
+    private func posterUpNext(for show: String) -> some View {
+        let episodes = library.videos.filter { $0.kind == .tv && $0.show == show }
+        if let next = VideoItem.upNext(in: episodes, state: watchState) {
+            let episode = displayVideo(next.episode)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Up Next").font(textSize.bold(12))
+                    Text(episode.title).font(textSize.font(12)).lineLimit(1)
+                    Text(upNextDetail(episode, position: next.position))
+                        .font(textSize.font(11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button { playing = episode } label: {
+                    Label(next.position > 0 ? "Resume" : "Play Episode", systemImage: "play.fill")
+                        .fixedSize()
+                }
+                .buttonStyle(ChromeButtonStyle())
+            }
+            .padding(10)
+            .background(Theme.hex(0xEDF2F9))
+            .overlay { Rectangle().strokeBorder(Theme.chromeLine.opacity(0.25)) }
+            .padding(.horizontal, 12)
+        }
+    }
+
+    private func upNextDetail(_ episode: VideoItem, position: Double) -> String {
+        var detail = episode.season == 0 ? "Specials" : "Season \(episode.season)"
+        if episode.episode > 0 { detail += " · Episode \(episode.episode)" }
+        if position > 0 { detail += " · \(Format.duration(position))" }
+        return detail
+    }
+
+    private func posterEpisodes(_ showEpisodes: [VideoItem], show: String) -> some View {
+        let visible = showEpisodes.filter { posterSeason == nil || posterSeason == $0.season }
+            .sorted(by: VideoItem.episodeOrder)
+        let groups = Dictionary(grouping: visible, by: \.season)
+        let seasons = groups.keys.sorted { ($0 == 0 ? 1 : 0, $0) < ($1 == 0 ? 1 : 0, $1) }
+
+        return Group {
+            if visible.isEmpty {
+                ContentUnavailableView("No Matching Episodes", systemImage: "tv")
+            } else {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(seasons, id: \.self) { season in
+                        let episodes = groups[season, default: []]
+                        let collapsed = collapsedPosterSeasons[show, default: []].contains(season)
+                        Section {
+                            if !collapsed {
+                                ForEach(Array(episodes.enumerated()), id: \.element.id) { index, episode in
+                                    posterEpisodeRow(episode)
+                                        .background(index.isMultiple(of: 2) ? Color.white : Theme.hex(0xEDF2F9))
+                                }
+                            }
+                        } header: {
+                            posterSeasonHeader(season, show: show, collapsed: collapsed)
+                                .padding(.top, season == seasons.first ? 0 : 12)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func posterSeasonHeader(_ season: Int, show: String, collapsed: Bool) -> some View {
+        let label = season == 0 ? "Specials" : "Season \(season)"
+        return Button {
+            if collapsed {
+                collapsedPosterSeasons[show, default: []].remove(season)
+            } else {
+                collapsedPosterSeasons[show, default: []].insert(season)
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .frame(width: 11)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(textSize.bold(12))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(Theme.glossyHeader)
+            .overlay {
+                Rectangle().strokeBorder(Theme.chromeLine.opacity(0.65), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+        .help(collapsed ? "Show episodes" : "Hide episodes")
+    }
+
+    private func posterEpisodeRow(_ episode: VideoItem) -> some View {
+        let state = watchState(episode)
+        return Button { playing = episode } label: {
+            HStack {
+                VideoPreviewDetails(video: episode, url: library.url(forVideo: episode), revision: library.videoMetadataRevision)
+                if state.watched { Image(systemName: "checkmark.circle.fill").foregroundStyle(.blue) }
+                else if state.fraction > 0 { ProgressView(value: state.fraction).frame(width: 45) }
+            }.contentShape(Rectangle()).padding(6)
+        }
+        .buttonStyle(.plain)
+        .contextMenu { posterMenu(episode) }
     }
 
     private func card(_ video: VideoItem, label: String, showArtwork: Bool = false, action: @escaping (VideoItem) -> Void) -> some View {
@@ -380,7 +490,7 @@ struct VideoPage: View {
             VStack(alignment: .leading, spacing: 4) {
                 VideoPreviewDetails(video: video, url: library.url(forVideo: video), poster: true,
                                     showArtwork: showArtwork, revision: library.videoMetadataRevision)
-                Text(label).font(Theme.listBoldFont(11)).lineLimit(2)
+                Text(label).font(textSize.bold(11)).lineLimit(2)
                 if watchState(video).seconds > 0, !watchState(video).watched {
                     ProgressView(value: watchState(video).fraction).frame(width: 118)
                 }
@@ -402,12 +512,14 @@ struct VideoPage: View {
 }
 
 @MainActor
-private struct VideoInfoSheet: View {
+struct VideoInfoSheet: View {
     @ObservedObject var library: LibraryStore
     let video: VideoItem
     let url: URL
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
+    @State private var season = ""
+    @State private var episode = ""
     @State private var overview = ""
     @State private var detectedOverview = ""
     @State private var savedOverview: String?
@@ -423,62 +535,118 @@ private struct VideoInfoSheet: View {
     @State private var loading = true
     @State private var error: String?
 
+    private var renumbering: Bool {
+        video.kind == .tv && (Int(season) != video.season || Int(episode) != video.episode)
+    }
+
+    private var newEpisodePath: String? {
+        guard renumbering, let root = library.libraryRoot, let season = Int(season), let episode = Int(episode) else { return nil }
+        return VideoScanner.episodePath(for: video, season: season, episode: episode, at: root)
+    }
+
+    private var lookupVideo: VideoItem {
+        var draft = video
+        if let value = Int(season) { draft.season = value }
+        if let value = Int(episode) { draft.episode = value }
+        return draft
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(video.kind == .tv ? "Episode Info" : "Video Info").font(.headline)
             if video.kind == .tv {
-                Text("\(video.show) · Season \(video.season) · Episode \(video.episode)")
+                Text(video.show)
                     .foregroundStyle(.secondary)
             }
-            Form {
-                TextField("Title", text: $title)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Description")
-                    TextEditor(text: $overview)
-                        .frame(height: 70)
-                        .border(.quaternary)
-                        .accessibilityLabel("Description")
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text("Title").gridColumnAlignment(.trailing)
+                    TextField("Title", text: $title).labelsHidden()
                 }
-                Toggle("Override release date", isOn: $useReleaseDate)
-                    .onChange(of: useReleaseDate) { _, enabled in
-                        if !enabled { resetReleaseDate = true }
+                if video.kind == .tv {
+                    GridRow {
+                        Text("Season")
+                        HStack(spacing: 10) {
+                            TextField("Season", text: $season).labelsHidden().frame(width: 58)
+                            Text("Episode")
+                            TextField("Episode", text: $episode).labelsHidden().frame(width: 64)
+                        }
                     }
-                if useReleaseDate {
-                    DatePicker("Release date", selection: $releaseDate, displayedComponents: .date)
-                        .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
-                } else if let detectedDate {
-                    Text(detectedDate, format: .iso8601.year().month().day())
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    if let data = artwork ?? detectedArtwork, let image = NSImage(data: data) {
-                        Image(nsImage: image).resizable().scaledToFit().frame(width: 72, height: 88)
-                    }
-                    Button("Choose Artwork…") { choosingArtwork = true }
-                    if artwork != nil {
-                        Button("Use Detected Artwork") {
-                            artwork = nil
-                            resetArtwork = true
+                    if let path = newEpisodePath {
+                        GridRow {
+                            Color.clear.frame(width: 0, height: 0)
+                            Text("Move to \(path)").foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    } else if !loading && renumbering {
+                        GridRow {
+                            Color.clear.frame(width: 0, height: 0)
+                            Text("Season 0–99, episode 1–999.").foregroundStyle(.secondary)
                         }
                     }
                 }
+                GridRow(alignment: .top) {
+                    Text("Description").padding(.top, 3)
+                    TextEditor(text: $overview)
+                        .frame(height: 84)
+                        .border(.quaternary)
+                        .accessibilityLabel("Description")
+                }
+                GridRow(alignment: .top) {
+                    Text("Release date")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Override release date", isOn: $useReleaseDate)
+                            .onChange(of: useReleaseDate) { _, enabled in
+                                if !enabled { resetReleaseDate = true }
+                            }
+                        if useReleaseDate {
+                            DatePicker("Release date", selection: $releaseDate, displayedComponents: .date)
+                                .labelsHidden().environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
+                        } else if let detectedDate {
+                            Text(detectedDate, format: .iso8601.year().month().day())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                GridRow(alignment: .top) {
+                    Text("Artwork")
+                    HStack(spacing: 12) {
+                        if let data = artwork ?? detectedArtwork, let image = NSImage(data: data) {
+                            Image(nsImage: image).resizable().scaledToFit().frame(width: 64, height: 82)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button("Choose Artwork…") { choosingArtwork = true }
+                            if artwork != nil {
+                                Button("Use Detected Artwork") {
+                                    artwork = nil
+                                    resetArtwork = true
+                                }
+                            }
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
             }
+            .textFieldStyle(.roundedBorder)
             .disabled(loading)
             if let error { Text(error).foregroundStyle(.red) }
             HStack {
                 if loading { ProgressView().controlSize(.small) }
-                Button("Find Metadata…") { findingMetadata = true }.disabled(loading)
+                Button("Find Metadata…") { findingMetadata = true }.disabled(loading || (renumbering && newEpisodePath == nil))
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save") { save() }.keyboardShortcut(.defaultAction)
-                    .disabled(loading || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(loading || (renumbering && newEpisodePath == nil) || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(22)
-        .frame(width: 470)
+        .frame(width: 520)
         .task {
             let edit = library.videoMetadata(for: url)
             title = edit?.title ?? video.title
+            season = String(video.season)
+            episode = String(video.episode)
             useReleaseDate = edit?.releaseDate != nil
             artwork = edit?.artwork
             resetArtwork = edit?.resetArtwork == true
@@ -493,7 +661,7 @@ private struct VideoInfoSheet: View {
             loading = false
         }
         .sheet(isPresented: $findingMetadata) {
-            VideoLookupSheet(video: video, rememberedMatch: library.rememberedTVMatch(for: video.show),
+            VideoLookupSheet(video: lookupVideo, rememberedMatch: library.rememberedTVMatch(for: video.show),
                              onRemember: { library.rememberTVMatch($0, for: video.show) },
                              onUse: { metadata, missingArtwork in
                 if let title = metadata.title, !title.isEmpty { self.title = title }
@@ -534,7 +702,11 @@ private struct VideoInfoSheet: View {
                                          resetReleaseDate: !useReleaseDate && resetReleaseDate ? true : nil,
                                          overview: description)
         do {
-            try library.saveVideoMetadata(metadata, for: url)
+            if renumbering, let season = Int(season), let episode = Int(episode) {
+                try library.renumberEpisode(video, season: season, episode: episode, saving: metadata)
+            } else {
+                try library.saveVideoMetadata(metadata, for: url)
+            }
             dismiss()
         } catch { self.error = error.localizedDescription }
     }
@@ -543,6 +715,7 @@ private struct VideoInfoSheet: View {
 /// One column of the video browser, styled like the music column browser.
 @MainActor
 struct VideoColumn: View {
+    @Environment(\.interfaceTextSize) private var textSize
     struct Item: Identifiable, Hashable {
         let id: String
         let label: String
@@ -559,7 +732,7 @@ struct VideoColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 11 + textSize.extra, weight: .semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 3)
                 .background(LinearGradient(colors: [Theme.hex(0xF4F4F4), Theme.hex(0xD9D9D9)], startPoint: .top, endPoint: .bottom))
@@ -580,7 +753,7 @@ struct VideoColumn: View {
                 }
             }
             .listStyle(.plain)
-            .font(.system(size: 11))
+            .font(.system(size: 11 + textSize.extra))
         }
     }
 }

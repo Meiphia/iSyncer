@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TVSyncPicker: View {
+    @Environment(\.interfaceTextSize) private var textSize
     let episodes: [VideoItem]
     let search: String
     @Binding var selection: ClassicSyncSettings
@@ -20,7 +21,7 @@ struct TVSyncPicker: View {
         let visible = Dictionary(grouping: matches, by: \.show)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("TV Shows").font(Theme.listBoldFont(13))
+                Text("TV Shows").font(textSize.bold(13))
                 Spacer()
                 Button("Select All") { select(matches, included: true) }
                     .disabled(matches.isEmpty)

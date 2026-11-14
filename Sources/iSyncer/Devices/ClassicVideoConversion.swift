@@ -3,6 +3,19 @@ import CryptoKit
 import Foundation
 
 enum ClassicVideoConversion {
+    static func cachedVideo(for url: URL, size: Int, date: Date, profile: String, in cache: URL) -> URL {
+        let identity = "\(profile)\0\(url.path)\0\(size)\0\(date.timeIntervalSinceReferenceDate)"
+        let key = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        return cache.appending(path: key + ".mp4")
+    }
+
+    static func transferIdentity(for url: URL, size: Int, date: Date, in cache: URL) -> EpisodeTransferIdentity {
+        let profiles = ["mpeg4-simple-aligned-v2", "mpeg4-simple-v1"]
+        return EpisodeTransferIdentity(sources: [url] + profiles.map {
+            cachedVideo(for: url, size: size, date: date, profile: $0, in: cache)
+        }, date: date)
+    }
+
     static func prepare(_ video: ClassicVideo, cache: URL) async throws -> Song {
         if let original = try? await LibraryScanner.scanVideo(video) { return original }
         guard let ffmpeg = Tools.ffmpeg else { throw SyncError("Video conversion requires FFmpeg.") }
@@ -12,13 +25,8 @@ enum ClassicVideoConversion {
               let size = values.fileSize, let date = values.contentModificationDate else {
             throw SyncError("Cannot read the source video.")
         }
-        func cachedVideo(_ profile: String) -> URL {
-            let identity = "\(profile)\0\(video.url.path)\0\(size)\0\(date.timeIntervalSinceReferenceDate)"
-            let key = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-            return cache.appending(path: key + ".mp4")
-        }
-        let output = cachedVideo("mpeg4-simple-aligned-v2")
-        let previous = cachedVideo("mpeg4-simple-v1")
+        let output = cachedVideo(for: video.url, size: size, date: date, profile: "mpeg4-simple-aligned-v2", in: cache)
+        let previous = cachedVideo(for: video.url, size: size, date: date, profile: "mpeg4-simple-v1", in: cache)
         func scan(_ url: URL) async throws -> Song {
             let song = try await LibraryScanner.scanVideo(.init(url: url, title: video.title, show: video.show,
                                                      season: video.season, episode: video.episode, year: video.year),

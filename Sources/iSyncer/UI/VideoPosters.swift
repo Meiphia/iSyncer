@@ -5,6 +5,7 @@ import SwiftUI
 
 @MainActor
 struct VideoPreviewDetails: View {
+    @Environment(\.interfaceTextSize) private var textSize
     let video: VideoItem
     let url: URL?
     var poster = false
@@ -22,7 +23,7 @@ struct VideoPreviewDetails: View {
                 HStack(spacing: 10) {
                     image.frame(width: 91, height: 52)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(video.displayTitle).font(Theme.listBoldFont(12)).lineLimit(1)
+                        Text(video.displayTitle).font(textSize.bold(12)).lineLimit(1)
                         if !overview.isEmpty {
                             Text(overview).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                         }

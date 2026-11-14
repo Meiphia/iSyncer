@@ -514,7 +514,8 @@ private final class ProgressLog: @unchecked Sendable {
                           pinnedTV.url: .init(seconds: 0.5, played: false)]
     let update = try SyncEngine.preview(media, on: withSpoken, options: progress)
     #expect(update.pending.isEmpty)
-    #expect(update.items.filter { $0.detail == "Playback position and played status" }.count == 3)
+    #expect(update.metadataUpdateCount == 0)
+    #expect(update.bookmarkUpdateCount == 3)
     #expect(try SyncEngine.apply(update, backups: backups) { _, _, _ in } == 0)
     let updatedPlays = try SyncEngine.readPlays(on: withSpoken, includeVideo: true)
     #expect(updatedPlays.first { $0.kind == .podcast }?.bookmarkMilliseconds == 700)
@@ -535,6 +536,48 @@ private final class ProgressLog: @unchecked Sendable {
     #expect(try SyncEngine.apply(bookmarkOnly, backups: backups) { _, _, _ in } == 0)
     #expect(try SyncEngine.readPlays(on: withSpoken).first { $0.kind == .audiobook }?.bookmarkMilliseconds == 900)
     #expect(throws: SyncError.self) { try SyncEngine.validatePlaybackSnapshot(bookmarkOnly) }
+
+    let finished = try source("Finished episode", kind: .podcast)
+    let newest = try source("Newest episode", kind: .podcast)
+    var catchUp = SyncOptions()
+    catchUp.listening[finished.url] = ClassicListeningState(seconds: 0, played: true)
+    let addFinished = try SyncEngine.preview([finished], on: Device.inspect(mount), options: catchUp)
+    #expect(try SyncEngine.apply(addFinished, backups: backups) { _, _, _ in } == 1)
+    let withFinished = try Device.inspect(mount)
+    catchUp = SyncOptions()
+    catchUp.podcastLimits["Show"] = PodcastSyncLimit(latest: 1, removeOlder: true, unplayed: true)
+    let keep = try SyncEngine.preview([episode, newest, finished], on: withFinished, options: catchUp)
+    #expect(keep.pending.map(\.title) == [newest.title])
+    #expect(keep.alreadyOnDevice == 1) // The in-progress episode gets its own slot.
+    #expect(keep.removedTrackCount == 0)
+    catchUp.podcastLimits["Show"] = PodcastSyncLimit(latest: 1, removeOlder: true, removePlayed: true, unplayed: true)
+    let prune = try SyncEngine.preview([episode, newest, finished], on: withFinished, options: catchUp)
+    #expect(prune.pending.map(\.title) == [newest.title])
+    #expect(prune.alreadyOnDevice == 1)
+    #expect(prune.removedTrackCount == 1)
+    #expect(prune.items.first { $0.action == .remove }?.title == finished.title)
+
+
+
+    // A renumbered TV episode can update an already-converted copy without another transfer.
+    let target = root.appending(path: "Renumbered/S02E07.mkv")
+    var correction = SyncOptions()
+    correction.episodeCorrections = [EpisodeCorrection(
+        target: target, season: 2, episode: 7,
+        transfers: [EpisodeTransferIdentity(sources: [pinnedTV.url], date: pinnedTV.modificationDate)]
+    )]
+    let before = try #require(SyncEngine.readPlays(on: withFinished, includeVideo: true).first { $0.kind == .tvShow })
+    let renumber = try SyncEngine.preview([], on: withFinished, options: correction)
+    #expect(renumber.hasChanges && renumber.pending.isEmpty)
+    #expect(renumber.metadataUpdateCount == 1)
+    #expect(try SyncEngine.apply(renumber, backups: backups) { _, _, _ in } == 0)
+    let refreshed = try Device.inspect(mount)
+    let after = try #require(SyncEngine.readPlays(on: refreshed, includeVideo: true).first { $0.kind == .tvShow })
+    #expect(after.id == before.id)
+    #expect(after.filePath == before.filePath)
+    #expect(after.bookmarkMilliseconds == before.bookmarkMilliseconds)
+    #expect(after.videoSyncKey?.hasPrefix("tv:2:7:") == true)
+    #expect(try !SyncEngine.preview([], on: refreshed, options: correction).hasChanges)
 
 }
 

@@ -96,17 +96,18 @@ struct RoundButtonStyle: ButtonStyle {
 
 /// Glossy grey button with compact icon and text sizes.
 struct ChromeButtonStyle: ButtonStyle {
+    @Environment(\.interfaceTextSize) private var textSize
     var active = false
     var compact = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 12 + (compact ? 0 : textSize.extra), weight: .semibold))
             .foregroundStyle(active ? Theme.hex(0x1F5FC4) : Theme.hex(0x333333))
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, compact ? 0 : 10)
-            .frame(width: compact ? 30 : nil, height: compact ? 22 : 25)
+            .frame(width: compact ? 30 : nil, height: compact ? 22 : 25 + textSize.extra)
             .background(
                 RoundedRectangle(cornerRadius: 4)
                     .fill(LinearGradient(
@@ -120,6 +121,7 @@ struct ChromeButtonStyle: ButtonStyle {
 
 /// Aqua-ish pill button for Sync / Apply.
 struct PillButtonStyle: ButtonStyle {
+    @Environment(\.interfaceTextSize) private var textSize
     var prominent = false
     @Environment(\.isEnabled) private var isEnabled
 
@@ -128,7 +130,7 @@ struct PillButtonStyle: ButtonStyle {
         let top = highlighted ? Theme.hex(0x8EC0F7) : Theme.hex(0xFBFBFB)
         let bottom = highlighted ? Theme.hex(0x2F78D8) : Theme.hex(0xCFCFCF)
         return configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: 13 + textSize.extra, weight: .semibold))
             .foregroundStyle(highlighted ? .white : Theme.hex(isEnabled ? 0x222222 : 0x777777))
             .padding(.horizontal, 22)
             .padding(.vertical, 5)

@@ -162,7 +162,7 @@ private struct DeviceLayout {
 
 public struct SyncItem: Codable, Sendable {
     public enum Action: String, CaseIterable, Codable, Sendable {
-        case add = "Add", replace = "Replace", metadata = "Update Metadata", remove = "Remove", skip = "Skip"
+        case add = "Add", replace = "Replace", metadata = "Update Metadata", bookmark = "Update Bookmark", importBookmark = "Import Bookmark", remove = "Remove", skip = "Skip"
     }
     public let action: Action
     public let title: String
@@ -182,6 +182,14 @@ public struct SyncMetadataChange: Codable, Sendable {
     public let after: String
     public var beforeImage: Data? = nil
     public var afterImage: Data? = nil
+
+    public init(field: String, before: String, after: String, beforeImage: Data? = nil, afterImage: Data? = nil) {
+        self.field = field
+        self.before = before
+        self.after = after
+        self.beforeImage = beforeImage
+        self.afterImage = afterImage
+    }
 }
 
 public struct SyncPlan: Sendable {
@@ -193,6 +201,12 @@ public struct SyncPlan: Sendable {
     public let bytes: Int64
     public let reclaimableBytes: Int64
     public var removedTrackCount: Int { removedTracks.count }
+    public var metadataUpdateCount: Int {
+        Set(artistOverrides.keys).union(podcastUpdates.keys).union(videoReleaseDates.keys)
+            .union(videoTitles.keys).union(videoDescriptions.keys).union(episodeNumbers.keys).union(removedVideoArtwork).union(artworkSongs.keys)
+            .subtracting(entries.map { $0.path.lowercased() }).count
+    }
+    public var bookmarkUpdateCount: Int { items.count { $0.action == .bookmark } }
     public let available: Int64
     public var canFit: Bool { required <= available - fillReserve }
     public var playlistCount: Int { playlists.count }
@@ -218,7 +232,7 @@ public struct SyncPlan: Sendable {
         !entries.isEmpty || !playlists.isEmpty || !removedPlaylists.isEmpty || !artworkSongs.isEmpty ||
         retagCount > 0 || !podcastUpdates.isEmpty || !videoReleaseDates.isEmpty || !videoTitles.isEmpty ||
         !videoDescriptions.isEmpty || !removedVideoArtwork.isEmpty || !removedTracks.isEmpty || repairsPodcastIndex ||
-        !listening.isEmpty
+        !listening.isEmpty || !episodeNumbers.isEmpty
     }
     fileprivate let entries: [Database.Addition]
     fileprivate let device: Device
@@ -231,6 +245,7 @@ public struct SyncPlan: Sendable {
     fileprivate let videoReleaseDates: [String: Int]
     fileprivate let videoTitles: [String: String]
     fileprivate let videoDescriptions: [String: String]
+    fileprivate let episodeNumbers: [String: EpisodeCorrection]
     fileprivate let removedVideoArtwork: Set<String>
     fileprivate let artistOverrides: [String: String]
     fileprivate let artworkSongs: [String: Song]
@@ -357,9 +372,14 @@ public enum SyncEngine {
            Set(played.filter { $0.kind == .tvShow && $0.played }.compactMap(\.videoSyncKey)) != expected {
             throw SyncError("iPod watching history changed. Preview Sync again.")
         }
-        let playedIDs = Set(played.filter { $0.kind == .podcast && $0.played }.map(\.id))
-        let deviceEnclosures = Set(played.filter { $0.kind == .podcast && $0.played && !$0.enclosure.isEmpty }.map(\.enclosure))
-        let deviceTitles = Dictionary(grouping: played.filter { $0.kind == .podcast && $0.enclosure.isEmpty }) {
+        let podcastPlays = played.filter { $0.kind == .podcast }
+        func podcastState(_ play: DevicePlayCount) -> ClassicListeningState {
+            options.existingListening[play.id] ?? play.listeningState
+        }
+        let playedIDs = Set(podcastPlays.filter { podcastState($0).played }.map(\.id))
+        let inProgressIDs = Set(podcastPlays.filter { podcastState($0).milliseconds > 0 && !podcastState($0).played }.map(\.id))
+        let deviceEnclosures = Dictionary(grouping: podcastPlays.filter { !$0.enclosure.isEmpty }, by: \.enclosure)
+        let deviceTitles = Dictionary(grouping: podcastPlays.filter { $0.enclosure.isEmpty }) {
             [$0.album, $0.title].map { $0.precomposedStringWithCanonicalMapping }
         }
         let podcastCandidates = candidates.filter { $0.classification == .podcast }
@@ -368,17 +388,22 @@ public enum SyncEngine {
         }
         var playedSources = Set<URL>()
         var playedEnclosures = Set<String>()
+        var startedSources = Set<URL>()
         let eligible = candidates.filter { song in
             guard song.classification == .podcast, let policy = options.podcastLimits[song.group], policy.unplayed else { return true }
             let enclosure = song.podcastMetadata?.enclosure ?? ""
             let title = [song.group, song.title].map { $0.precomposedStringWithCanonicalMapping }
-            let oldMatch = localTitles[title]?.count == 1 && deviceTitles[title]?.count == 1
-                && deviceTitles[title]?.first?.played == true
-            let onDevice = (!enclosure.isEmpty && deviceEnclosures.contains(enclosure)) || oldMatch
-            let locally = options.playedPodcastURLs.contains(song.url)
-            if onDevice { playedSources.insert(song.url) }
-            if (onDevice || locally), !enclosure.isEmpty { playedEnclosures.insert(enclosure) }
-            return policy.pinned.contains(song.url) || (!onDevice && !locally)
+            let byEnclosure = enclosure.isEmpty ? [] : deviceEnclosures[enclosure] ?? []
+            let byTitle = localTitles[title]?.count == 1 ? deviceTitles[title] ?? [] : []
+            let match = byEnclosure.isEmpty ? byTitle : byEnclosure
+            let resolved = match.count == 1 ? match.first.map(podcastState) : nil
+            let justStarted = (options.listening[song.url]?.milliseconds ?? 0) > 0
+            let reconciled = match.count == 1 && match.first.map { options.existingListening[$0.id] != nil } == true
+            let finished = resolved?.played == true || (!reconciled && options.playedPodcastURLs.contains(song.url))
+            if resolved?.played == true { playedSources.insert(song.url) }
+            if finished, !enclosure.isEmpty { playedEnclosures.insert(enclosure) }
+            if !finished, ((resolved?.milliseconds ?? 0) > 0 || justStarted) { startedSources.insert(song.url) }
+            return policy.pinned.contains(song.url) || !finished
         }
         let knownPodcastEnclosures = Dictionary(grouping: database.tracks.filter {
             $0.mediaType == ClassicMediaKind.podcast.rawValue && !($0.fields[15] ?? "").isEmpty
@@ -397,7 +422,9 @@ public enum SyncEngine {
                 let second = $1.releaseDate ?? $1.modificationDate
                 return first == second ? $0.url.path < $1.url.path : first > second
             }
-            retained.formUnion(newest.prefix(policy.latest).map(\.id))
+            let unpinned = newest.filter { (!policy.unplayed || !policy.pinned.contains($0.id)) && !startedSources.contains($0.id) }
+            retained.formUnion(unpinned.prefix(policy.latest).map(\.id))
+            retained.formUnion(newest.filter { startedSources.contains($0.id) }.map(\.id))
             retained.formUnion(policy.pinned)
         }
         var songs = eligible.filter { song in
@@ -417,11 +444,28 @@ public enum SyncEngine {
             if known[typedKey] == nil { known[typedKey] = track }
         }
 
+        let television = paths.values.filter { $0.mediaType == ClassicMediaKind.tvShow.rawValue }
+        let correctionMatches = options.episodeCorrections.flatMap { correction in
+            television.filter { track in correction.transfers.contains { $0.matches(path: track.path, size: track.size) } }
+                .map { (correction, $0) }
+        }
+        let byTrack = Dictionary(grouping: correctionMatches, by: { $0.1.id })
+        let byTarget = Dictionary(grouping: correctionMatches, by: { $0.0.target })
+        let unambiguous = correctionMatches.filter { byTrack[$0.1.id]?.count == 1 && byTarget[$0.0.target]?.count == 1 }
+        let correctedTracks = Dictionary(uniqueKeysWithValues: unambiguous.map { ($0.0.target, $0.1) })
+        let correctedSources = Dictionary(uniqueKeysWithValues: unambiguous.map { ($0.1.id, $0.0.target) })
+        let episodeNumbers = Dictionary(uniqueKeysWithValues: unambiguous.compactMap { correction, track -> (String, EpisodeCorrection)? in
+            guard !options.removedVideoIDs.contains(track.persistentID),
+                  track.season != correction.season || track.episode != correction.episode else { return nil }
+            return (track.path.lowercased(), correction)
+        })
         let occupied = Set(database.tracks.map { $0.path.lowercased() })
         let selectedMusicPaths = Set((songs + options.fillAlbums.flatMap { $0 }).filter { $0.classification == .music }.map {
             transferPath($0.url, size: $0.size, date: $0.modificationDate, kind: .music).lowercased()
         })
         func existingTrack(for song: Song, path: String) -> Database.Track? {
+            let source = song.originalSource ?? song.url
+            if song.classification == .tvShow, let existing = correctedTracks[source] { return existing }
             if song.classification == .podcast, let enclosure = song.podcastMetadata?.enclosure,
                candidateEnclosures[enclosure]?.count == 1, let match = knownPodcastEnclosures[enclosure],
                match.count == 1, let track = match.first, paths[track.path.lowercased()] != nil {
@@ -442,7 +486,9 @@ public enum SyncEngine {
                     (selectedMusicPaths.contains($0.path.lowercased()) ||
                      (options.matchMusicByPath.contains(song.id) && isManagedTransferPath($0.path)))
             } == true
-            return paths[path.lowercased()] ?? (otherEdition ? nil : candidate)
+            let match = paths[path.lowercased()] ?? (otherEdition ? nil : candidate)
+            if let match, let owner = correctedSources[match.id], owner != source { return nil }
+            return match
         }
         var includesFillTransfers = false
         if !options.fillAlbums.isEmpty {
@@ -578,21 +624,29 @@ public enum SyncEngine {
         guard removedTracks.count == options.removedVideoIDs.count else {
             throw SyncError("The selected videos changed on the iPod. Refresh and select them again.")
         }
-        let wanted = Set(matchedPaths.values).union(options.retainedTVKeys.isEmpty ? [] :
+        let pinnedPodcasts = podcastCandidates.filter { options.podcastLimits[$0.group]?.pinned.contains($0.id) == true }
+        let pinnedPaths = pinnedPodcasts.compactMap { song in
+            let path = transferPath(song.url, size: song.size, date: song.modificationDate, kind: .podcast)
+            return existingTrack(for: song, path: path)?.path.lowercased()
+        }
+        let wanted = Set(matchedPaths.values).union(pinnedPaths).union(options.retainedTVKeys.isEmpty ? [] :
             database.tracks.filter { $0.mediaType == ClassicMediaKind.tvShow.rawValue && options.retainedTVKeys.contains($0.videoSyncKey) }
                 .map { $0.path.lowercased() })
         let expiredTV = Set(database.tracks.filter {
             $0.mediaType == ClassicMediaKind.tvShow.rawValue && options.expiredTVKeys.contains($0.videoSyncKey) &&
-                !wanted.contains($0.path.lowercased()) && isManagedTransferPath($0.path)
+                !wanted.contains($0.path.lowercased()) && episodeNumbers[$0.path.lowercased()] == nil && isManagedTransferPath($0.path)
         }.map(\.id))
         removedTracks.formUnion(expiredTV)
         let limitedShows = Set(options.podcastLimits.compactMap { $0.value.removeOlder ? $0.key.precomposedStringWithCanonicalMapping : nil })
         for track in database.tracks {
             let music = track.mediaType == 0 || track.mediaType == ClassicMediaKind.music.rawValue
-            let limitedPodcast = track.mediaType == ClassicMediaKind.podcast.rawValue &&
-                (limitedShows.contains((track.fields[3] ?? "").precomposedStringWithCanonicalMapping) ||
-                 (playedOnlyShows.contains((track.fields[3] ?? "").precomposedStringWithCanonicalMapping) &&
-                  (playedIDs.contains(track.persistentID) || playedEnclosures.contains(track.fields[15] ?? ""))))
+            let show = (track.fields[3] ?? "").precomposedStringWithCanonicalMapping
+            let policy = options.podcastLimits[show]
+            let finished = playedIDs.contains(track.persistentID) || playedEnclosures.contains(track.fields[15] ?? "")
+            let started = inProgressIDs.contains(track.persistentID)
+            let expiredPodcast = limitedShows.contains(show) && (policy?.unplayed != true || (!finished && !started))
+            let finishedPodcast = playedOnlyShows.contains(show) && finished
+            let limitedPodcast = track.mediaType == ClassicMediaKind.podcast.rawValue && (expiredPodcast || finishedPodcast)
             guard (music && options.reconcileMusic) || limitedPodcast,
                   !wanted.contains(track.path.lowercased()), isManagedTransferPath(track.path) else { continue }
             removedTracks.insert(track.id)
@@ -657,7 +711,7 @@ public enum SyncEngine {
         }
         let transferPaths = Set(entries.map { $0.path.lowercased() })
         for path in Set(artistOverrides.keys).union(podcastUpdates.keys).union(videoReleaseDates.keys)
-            .union(videoTitles.keys).union(videoDescriptions.keys).union(removedVideoArtwork).union(artworkSongs.keys)
+            .union(videoTitles.keys).union(videoDescriptions.keys).union(episodeNumbers.keys).union(removedVideoArtwork).union(artworkSongs.keys)
             .subtracting(transferPaths).sorted() {
             guard let track = paths[path] else { continue }
             let detail = [
@@ -666,6 +720,7 @@ public enum SyncEngine {
                 videoReleaseDates[path] == nil ? nil : "Release date",
                 videoTitles[path] == nil ? nil : "Title",
                 videoDescriptions[path] == nil ? nil : "Description",
+                episodeNumbers[path] == nil ? nil : "Season and episode",
                 artworkSongs[path] == nil ? nil : "Check artwork",
                 removedVideoArtwork.contains(path) ? "Clear artwork" : nil
             ].compactMap { $0 }.joined(separator: ", ")
@@ -674,6 +729,12 @@ public enum SyncEngine {
                 item.metadataChanges = videoChanges(track, title: videoTitles[path], date: videoReleaseDates[path],
                                                     description: videoDescriptions[path], cover: artworkSongs[path],
                                                     clearsCover: removedVideoArtwork.contains(path), artworkIndex: artworkIndex)
+            }
+            if let correction = episodeNumbers[path] {
+                item.metadataChanges = (item.metadataChanges ?? []) + [
+                    SyncMetadataChange(field: "Episode number", before: "S\(track.season)E\(track.episode)",
+                                       after: "S\(correction.season)E\(correction.episode)")
+                ]
             }
             items.append(item)
         }
@@ -687,13 +748,13 @@ public enum SyncEngine {
                 : "Outside this iPod’s music selection."
             return SyncItem(.remove, $0.fields[1] ?? "Untitled", reason)
         }
-        let newTitles = Dictionary(uniqueKeysWithValues: entries.map { ($0.path.lowercased(), $0.song.title) })
         items += listening.keys.sorted().compactMap { path in
             guard let next = listening[path] else { return nil }
             let track = paths[path]
             let current = track.flatMap { loggedByID[$0.persistentID] }
-            guard let title = track?.fields[1] ?? newTitles[path] else { return nil }
-            var item = SyncItem(.metadata, title, "Playback position and played status")
+            guard let track, !transferPaths.contains(path), !replacedTracks.contains(track.id) else { return nil }
+            let title = track.fields[1] ?? "Untitled"
+            var item = SyncItem(.bookmark, title, "Playback position and played status")
             item.metadataChanges = [
                 SyncMetadataChange(field: "Position", before: Self.bookmarkTime(current?.bookmarkMilliseconds ?? 0),
                                    after: Self.bookmarkTime(next.milliseconds)),
@@ -710,7 +771,7 @@ public enum SyncEngine {
                         signature: Data(SHA256.hash(data: original)), required: bytes + overhead,
                         playlists: playlists, removedPlaylists: removedIDs, removedTracks: removedTracks,
                         podcastUpdates: podcastUpdates, videoReleaseDates: videoReleaseDates,
-                        videoTitles: videoTitles, videoDescriptions: videoDescriptions, removedVideoArtwork: removedVideoArtwork,
+                        videoTitles: videoTitles, videoDescriptions: videoDescriptions, episodeNumbers: episodeNumbers, removedVideoArtwork: removedVideoArtwork,
                         artistOverrides: artistOverrides, artworkSongs: artworkSongs, listening: listening,
                         fillReserve: includesFillTransfers ? options.fillReserve : 0,
                         playbackSnapshots: !readsListening ? [:] : [
@@ -871,7 +932,7 @@ public enum SyncEngine {
                                          removedTracks: removedTracks,
                                          artistOverrides: plan.artistOverrides, podcastUpdates: plan.podcastUpdates,
                                          videoReleaseDates: plan.videoReleaseDates, videoTitles: plan.videoTitles,
-                                         videoDescriptions: plan.videoDescriptions,
+                                         videoDescriptions: plan.videoDescriptions, episodeNumbers: stopped ? [:] : plan.episodeNumbers,
                                          removedVideoArtwork: plan.removedVideoArtwork,
                                          listening: stopped ? [:] : plan.listening,
                                          rebuildPodcastIndex: plan.repairsPodcastIndex) { track in
@@ -905,6 +966,10 @@ public enum SyncEngine {
                                        uniquingKeysWith: { first, _ in first })
         guard verification.tracks.count == database.tracks.count + copied.count - replacements.count - removedTracks.count,
               !verification.tracks.contains(where: { removedTracks.contains($0.id) }),
+              stopped || plan.episodeNumbers.allSatisfy({ path, correction in
+                  guard let track = verifiedPaths[path], let old = database.tracks.first(where: { $0.id == track.id }) else { return false }
+                  return track.persistentID == old.persistentID && track.season == correction.season && track.episode == correction.episode
+              }),
               copied.allSatisfy({ entry in
                   guard let track = verifiedPaths[entry.path.lowercased()], track.size == entry.song.size,
                         let url = layout.trackURL(for: entry.path), DeviceLayout.safeFile(url),
@@ -997,7 +1062,8 @@ public enum SyncEngine {
         let metadata = verification.tracks.compactMap { track -> SyncItem? in
             guard let old = prior[track.id],
                   old.fields.filter({ $0.key != 2 }) != track.fields.filter({ $0.key != 2 }) ||
-                  old.releaseTimestamp != track.releaseTimestamp || old.artworkID != track.artworkID else { return nil }
+                  old.releaseTimestamp != track.releaseTimestamp || old.artworkID != track.artworkID ||
+                  old.season != track.season || old.episode != track.episode else { return nil }
             return SyncItem(.metadata, track.fields[1] ?? "Untitled", track.fields[3] ?? "")
         }
         let playlistResults = playlists.map { SyncItem(.metadata, $0.name, "Playlist saved") }
@@ -1011,7 +1077,7 @@ public enum SyncEngine {
                 .values.map { SyncItem(.skip, $0.title, "Sync stopped before artwork was saved.") }
         }
         let podcastResult = plan.repairsPodcastIndex ? [SyncItem(.metadata, "Podcasts", "Episode index rebuilt")] : []
-        let listeningResult = stopped ? [] : plan.items.filter { $0.detail == "Playback position and played status" }
+        let listeningResult = stopped ? [] : plan.items.filter { $0.action == .bookmark }
         report(completed + deferred + metadata + playlistResults + removals + podcastResult + listeningResult + artworkSkips + cleanupIssues + plannedSkips)
         if writer?.skippedForSpace == true { notice(artworkWarning) }
         return copied.count

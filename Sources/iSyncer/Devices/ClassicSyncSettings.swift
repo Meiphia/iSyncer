@@ -35,7 +35,7 @@ struct ClassicSyncSettings: Codable, Equatable {
 
     mutating func setPodcastRetention(_ value: PodcastRetention, for show: String) {
         var policies = podcastRetention ?? [:]
-        policies[show] = value.limit == nil && value.pinned.isEmpty && value.unplayedOnly != true ? nil : value
+        policies[show] = value == PodcastRetention() ? nil : value
         podcastRetention = policies.isEmpty ? nil : policies
     }
 
@@ -63,6 +63,34 @@ struct ClassicSyncSettings: Codable, Equatable {
         setTVOverride(override, season: episode.season, show: episode.show)
     }
 
+    mutating func moveEpisodes(_ moves: [PlannedEpisodeMove]) {
+        moveEpisodes(moves.map { ($0.previous, $0.updated) })
+    }
+
+    mutating func moveEpisodes(_ moves: [(VideoItem, VideoItem)]) {
+        let old = self
+        for (previous, _) in moves {
+            if var season = tvOverrides?[previous.show]?[previous.season] {
+                season.episodes.removeValue(forKey: previous.id)
+                setTVOverride(season.included == nil && season.episodes.isEmpty ? nil : season,
+                              season: previous.season, show: previous.show)
+            }
+            tvRetention?[previous.show]?.pinned.remove(previous.id)
+            excludedVideos?.removeValue(forKey: previous.classicTVKey)
+        }
+        for (previous, updated) in moves {
+            if let choice = old.tvOverrides?[previous.show]?[previous.season]?.episodes[previous.id] {
+                selectTVEpisode(updated, included: choice)
+            }
+            if old.tvRetention?[previous.show]?.pinned.contains(previous.id) == true {
+                tvRetention?[updated.show]?.pinned.insert(updated.id)
+            }
+            if let exclusion = old.excludedVideos?[previous.classicTVKey] {
+                excludedVideos?[updated.classicTVKey] = exclusion
+            }
+        }
+    }
+
     private mutating func setTVOverride(_ override: TVSeasonSelection?, season: Int, show: String) {
         var shows = tvOverrides ?? [:]
         var seasons = shows[show] ?? [:]
@@ -76,6 +104,10 @@ struct PodcastRetention: Codable, Equatable {
     var limit: Int? = nil
     var pinned: Set<String> = []
     var unplayedOnly: Bool? = nil
+    var removeFinished: Bool? = nil
+
+    // Older Unplayed rules also pruned finished episodes. Keep that behavior on upgrade.
+    var removesFinished: Bool { removeFinished ?? (unplayedOnly == true) }
 }
 
 struct TVRetention: Codable, Equatable {

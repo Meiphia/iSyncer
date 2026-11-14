@@ -14,6 +14,7 @@ final class LyricsPresentation: ObservableObject {
 
 @MainActor
 struct LyricsPane: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var player: PlayerEngine
     @State private var lyrics: Lyrics?
     @State private var plain = false
@@ -76,9 +77,9 @@ struct LyricsPane: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 VStack(alignment: .leading) {
-                    Text(player.current?.title ?? "Lyrics").font(Theme.listBoldFont(12)).lineLimit(1)
+                    Text(player.current?.title ?? "Lyrics").font(textSize.bold(12)).lineLimit(1)
                     if let artist = player.current?.artist {
-                        Text(artist).font(Theme.listFont(11)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(artist).font(textSize.font(11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 6)
@@ -110,7 +111,7 @@ struct LyricsPane: View {
             timedLyrics(displayed.timed)
         } else if let displayed, !displayed.plain.isEmpty {
             ScrollView {
-                Text(displayed.plain).font(Theme.listFont(15)).lineSpacing(4).textSelection(.enabled)
+                Text(displayed.plain).font(textSize.font(15)).lineSpacing(4).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(16)
             }
         } else if player.current == nil {

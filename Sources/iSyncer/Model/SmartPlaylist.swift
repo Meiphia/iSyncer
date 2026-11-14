@@ -12,6 +12,8 @@ struct SmartPlaylist: Codable, Identifiable, Hashable, Sendable {
     var limitUnit: LimitUnit = .songs
     var selectedBy: SelectedBy = .random
     var onlyChecked = false
+    var syncToIPod: Bool? = nil
+    var sortWithoutLimit: Bool? = nil
     /// Keeps a random selection stable until the playlist is edited.
     var seed: UInt64 = UInt64.random(in: 0...UInt64.max)
 
@@ -56,7 +58,9 @@ struct SmartPlaylist: Codable, Identifiable, Hashable, Sendable {
             if active.isEmpty { return true }
             return matchAll ? active.allSatisfy { $0.matches(t, now: now) } : active.contains { $0.matches(t, now: now) }
         }
-        guard limitEnabled, limitCount > 0 else { return list.map(\.id) }
+        guard limitEnabled, limitCount > 0 else {
+            return (sortWithoutLimit == true ? sortForLimit(list) : list).map(\.id)
+        }
         list = sortForLimit(list)
         var out: [String] = []
         var used = 0.0
@@ -87,13 +91,13 @@ struct SmartPlaylist: Codable, Identifiable, Hashable, Sendable {
         case .artist: return list.sorted { (fold($0.artist), fold($0.album), $0.trackNumber) < (fold($1.artist), fold($1.album), $1.trackNumber) }
         case .genre: return list.sorted { (fold($0.genre), fold($0.artist)) < (fold($1.genre), fold($1.artist)) }
         case .name: return list.sorted { fold($0.title) < fold($1.title) }
-        case .highestRating: return list.sorted { $0.rating > $1.rating }
+        case .highestRating: return list.sorted { ($0.rating, $0.playCount) > ($1.rating, $1.playCount) }
         case .lowestRating: return list.sorted { $0.rating < $1.rating }
         case .mostRecentlyPlayed: return list.sorted { $0.lastPlayed > $1.lastPlayed }
         case .leastRecentlyPlayed: return list.sorted { $0.lastPlayed < $1.lastPlayed }
-        case .mostOftenPlayed: return list.sorted { $0.playCount > $1.playCount }
+        case .mostOftenPlayed: return list.sorted { ($0.playCount, $0.lastPlayed) > ($1.playCount, $1.lastPlayed) }
         case .leastOftenPlayed: return list.sorted { $0.playCount < $1.playCount }
-        case .mostRecentlyAdded: return list.sorted { $0.dateAdded > $1.dateAdded }
+        case .mostRecentlyAdded: return list.sorted { $0.dateAdded == $1.dateAdded ? $0.id < $1.id : $0.dateAdded > $1.dateAdded }
         case .leastRecentlyAdded: return list.sorted { $0.dateAdded < $1.dateAdded }
         }
     }
@@ -183,7 +187,7 @@ struct SmartRule: Codable, Identifiable, Hashable, Sendable {
     enum Op: String, Codable, CaseIterable, Identifiable, Sendable {
         case contains, notContains, isEqual, isNot, beginsWith, endsWith
         case greater, less, inRange
-        case inLast, notInLast, before, after
+        case inLast, notInLast, before, after, thisMonth, never, isSet
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -200,6 +204,9 @@ struct SmartRule: Codable, Identifiable, Hashable, Sendable {
             case .notInLast: return "is not in the last"
             case .before: return "is before"
             case .after: return "is after"
+            case .thisMonth: return "is this month"
+            case .never: return "is unset"
+            case .isSet: return "is set"
             }
         }
         static func options(for kind: Kind) -> [Op] {
@@ -207,7 +214,7 @@ struct SmartRule: Codable, Identifiable, Hashable, Sendable {
             case .text: return [.contains, .notContains, .isEqual, .isNot, .beginsWith, .endsWith]
             case .number: return [.isEqual, .isNot, .greater, .less, .inRange]
             case .rating: return [.isEqual, .isNot, .greater, .less, .inRange]
-            case .date: return [.inLast, .notInLast, .before, .after]
+            case .date: return [.inLast, .notInLast, .before, .after, .thisMonth, .never, .isSet]
             }
         }
     }
@@ -277,6 +284,9 @@ struct SmartRule: Codable, Identifiable, Hashable, Sendable {
             // `number` holds a date (seconds since 1970) for before/after.
             case .before: return v > 0 && v < number
             case .after: return v > number
+            case .thisMonth: return v > 0 && Calendar.current.isDate(Date(timeIntervalSince1970: v), equalTo: now, toGranularity: .month)
+            case .never: return v <= 0
+            case .isSet: return v > 0
             default: return false
             }
         }

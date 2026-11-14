@@ -94,6 +94,51 @@ enum VideoScanner {
         return item
     }
 
+    /// A scanner-readable destination for correcting an episode's numbering.
+    static func episodePath(for video: VideoItem, season: Int, episode: Int, at root: URL) -> String? {
+        guard video.kind == .tv, !video.show.isEmpty,
+              (0...99).contains(season), (1...999).contains(episode) else { return nil }
+        let parts = video.id.split(separator: "/").map(String.init)
+        guard let filename = parts.last else { return nil }
+        let folders = Array(parts.dropLast())
+        let showFolders: [String]
+        if let tv = folders.firstIndex(where: { tvFolders.contains($0.lowercased()) }) {
+            showFolders = tv + 1 < folders.count ? Array(folders.prefix(tv + 2)) : folders + [video.show]
+        } else if let index = folders.lastIndex(where: { seasonNumber($0) != nil }), index > 0 {
+            showFolders = Array(folders.prefix(index))
+        } else if let parent = folders.last, clean(parent) == video.show {
+            showFolders = folders
+        } else {
+            showFolders = folders + [video.show]
+        }
+        guard showFolders.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        let currentSeasonFolder = folders.dropFirst(showFolders.count).first
+        let showURL = root.appendingPathComponent(showFolders.joined(separator: "/"))
+        let seasonFolder: String
+        if let currentSeasonFolder, seasonNumber(currentSeasonFolder) == season {
+            seasonFolder = currentSeasonFolder
+        } else {
+            let existing = try? FileManager.default.contentsOfDirectory(at: showURL, includingPropertiesForKeys: [.isDirectoryKey])
+            seasonFolder = existing?.sorted { $0.lastPathComponent < $1.lastPathComponent }.first {
+                seasonNumber($0.lastPathComponent) == season &&
+                    (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }?.lastPathComponent ?? "Season \(season)"
+        }
+        let basename = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        let marker = String(format: "S%02dE%02d", season, episode)
+        let renamed: String
+        if let match = seasonEpisode(in: basename) {
+            renamed = basename.replacingCharacters(in: match.range, with: marker)
+        } else {
+            let suffix = leadingNumber(basename).map { clean($0.1) } ?? basename
+            renamed = suffix.isEmpty ? marker : "\(marker) - \(suffix)"
+        }
+        let targetFolders = season == video.season && seasonNumber(currentSeasonFolder ?? "") == season
+            ? folders : showFolders + [seasonFolder]
+        return (targetFolders + ["\(renamed).\(ext)"]).joined(separator: "/")
+    }
+
     // MARK: Pattern helpers
 
     /// S01E02 / s1e2 / 1x02 → (season, episode, range of the marker)
@@ -106,6 +151,10 @@ enum VideoScanner {
             return (season, episode, r)
         }
         return nil
+    }
+
+    static func folderSeason(for video: VideoItem) -> Int? {
+        video.id.split(separator: "/").dropLast().reversed().compactMap { seasonNumber(String($0)) }.first
     }
 
     private static func seasonNumber(_ folder: String) -> Int? {

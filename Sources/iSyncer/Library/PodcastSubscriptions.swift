@@ -105,7 +105,7 @@ final class PodcastSubscriptions: ObservableObject {
             }
         }
         status = shows.isEmpty ? "" : failures > 0 ? "\(downloaded) downloaded · \(failures) could not be checked or downloaded"
-            : downloaded > 0 ? "\(downloaded) new episodes downloaded" : "Followed shows are up to date"
+            : downloaded > 0 ? "\(downloaded) new episodes downloaded" : ""
     }
 
     private func save() {

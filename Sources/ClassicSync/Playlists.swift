@@ -94,6 +94,7 @@ public struct SyncOptions: Sendable {
     public var matchMusicByPath: Set<URL> = []
     public var fillAlbums: [[Song]] = []
     public var fillReserve: Int64 = 0
+    public var episodeCorrections: [EpisodeCorrection] = []
     public var expectedWatchedTVKeys: Set<String>? = nil
     public var expiredTVKeys: Set<String> = []
     public var retainedTVKeys: Set<String> = []
@@ -125,4 +126,35 @@ public final class SyncStop: @unchecked Sendable {
     public init() {}
     public func request() { lock.withLock { requested = true } }
     public var isRequested: Bool { lock.withLock { requested } }
+}
+
+/// The original transfer identity of a file whose episode numbering changed.
+public struct EpisodeTransferIdentity: Sendable {
+    public let sources: [URL]
+    public let date: Date
+
+    public init(sources: [URL], date: Date) {
+        self.sources = sources
+        self.date = date
+    }
+
+    public func matches(path: String, size: Int) -> Bool {
+        sources.contains {
+            SyncEngine.transferPath($0, size: size, date: date, kind: .tvShow).caseInsensitiveCompare(path) == .orderedSame
+        }
+    }
+}
+
+public struct EpisodeCorrection: Sendable {
+    public let target: URL
+    public let season: Int
+    public let episode: Int
+    public let transfers: [EpisodeTransferIdentity]
+
+    public init(target: URL, season: Int, episode: Int, transfers: [EpisodeTransferIdentity]) {
+        self.target = target
+        self.season = season
+        self.episode = episode
+        self.transfers = transfers
+    }
 }

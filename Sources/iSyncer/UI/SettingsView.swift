@@ -5,6 +5,7 @@ import AppKit
 struct SettingsView: View {
     var body: some View {
         TabView {
+            AppearanceSettings().tabItem { Label("Appearance", systemImage: "textformat.size") }
             LastFMSettings(lastfm: .shared)
                 .tabItem { Label("Last.fm", systemImage: "dot.radiowaves.left.and.right") }
             DiscordSettings().tabItem { Label("Discord", systemImage: "bubble.left.and.bubble.right") }
@@ -16,6 +17,21 @@ struct SettingsView: View {
         }
         .frame(width: 560, height: 560)
         .preferredColorScheme(.light)
+    }
+}
+
+private struct AppearanceSettings: View {
+    @AppStorage(InterfaceTextSize.storageKey) private var size = InterfaceTextSize.standard
+
+    var body: some View {
+        Form {
+            Picker("Interface text size", selection: $size) {
+                ForEach(InterfaceTextSize.allCases) { Text($0.label).tag($0) }
+            }
+            Text("Changes the text size in the sidebar, browser columns, track lists, and other interface controls.")
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
     }
 }
 

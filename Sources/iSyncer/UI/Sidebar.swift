@@ -5,6 +5,7 @@ import AppKit
 /// smart playlists, playlists) under a glossy header, with the artwork pane at the bottom.
 @MainActor
 struct Sidebar: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var browser: BrowserModel
     @ObservedObject var library: LibraryStore
     @ObservedObject var devices: DeviceManager
@@ -36,10 +37,19 @@ struct Sidebar: View {
                     Rectangle().fill(Theme.hex(0xB7C1CF)).frame(height: 1).padding(.vertical, 4).padding(.horizontal, 8)
 
                     ForEach(LibraryStore.smartPlaylistNames, id: \.self) { name in
-                        row(.smart(name), icon: SourceIcon(symbol: "gearshape.fill", color: Theme.hex(0x7E5BC2)),
-                            title: name, onDoubleClick: { playSmart(name) })
+                        if let list = library.builtInSmartList(named: name) {
+                            row(.smart(name), icon: SourceIcon(symbol: "gearshape.fill", color: Theme.hex(0x7E5BC2)),
+                                title: list.name, onDoubleClick: { playSmart(name) })
+                            .contextMenu {
+                                Button("Edit Smart Playlist…") { SmartPlaylistEditor.shared.open(list) }
+                                Button("Play") { playSmart(name) }
+                                if library.smartList(list.id) != nil {
+                                    Button("Reset to Default") { library.deleteSmartList(list.id) }
+                                }
+                            }
+                        }
                     }
-                    ForEach(library.smartLists) { sl in
+                    ForEach(library.customSmartLists) { sl in
                         row(.smartList(sl.id), icon: SourceIcon(symbol: "gearshape.fill", color: Theme.hex(0x7E5BC2)),
                             title: sl.name, onDoubleClick: { playSmartList(sl.id) })
                         .contextMenu {
@@ -104,14 +114,14 @@ struct Sidebar: View {
         return HStack(spacing: 5) {
             icon.frame(width: 16)
             Text(title)
-                .font(selected ? Theme.listBoldFont(12) : Theme.listFont(12))
+                .font(selected ? textSize.bold(12) : textSize.font(12))
                 .lineLimit(1)
             Spacer(minLength: 4)
         }
         .foregroundStyle(selected ? Color.white : Theme.hex(0x111111))
         .padding(.leading, 8)
         .padding(.trailing, 6)
-        .frame(height: 19)
+        .frame(height: 19 + textSize.extra)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? AnyView(Theme.selection) : AnyView(Color.clear))
         .contentShape(Rectangle())
@@ -155,7 +165,7 @@ struct Sidebar: View {
                         VStack(spacing: 4) {
                             Image(systemName: "music.note")
                                 .font(.system(size: 34, weight: .ultraLight))
-                            Text(artworkTrack == nil ? "" : "No Artwork").font(Theme.listFont(10))
+                            Text(artworkTrack == nil ? "" : "No Artwork").font(textSize.font(10))
                         }
                         .foregroundStyle(Theme.hex(0xB0B0B0))
                     }
@@ -217,14 +227,15 @@ struct SourceIcon: View {
 
 /// Glossy grey bar used for "Source", "Now Playing" and similar pane titles.
 struct GlossyHeader: View {
+    @Environment(\.interfaceTextSize) private var textSize
     let title: String
 
     var body: some View {
         Text(title)
-            .font(Theme.listFont(12))
+            .font(textSize.font(12))
             .foregroundStyle(Theme.hex(0x222222))
             .frame(maxWidth: .infinity)
-            .frame(height: 18)
+            .frame(height: 18 + textSize.extra)
             .background(Theme.glossyHeader)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hex(0x8E8E8E)).frame(height: 1) }
     }

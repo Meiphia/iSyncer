@@ -57,6 +57,19 @@ final class DeviceManager: ObservableObject {
         discardPreview()
     }
 
+    func moveEpisodeSettings(_ plan: [PlannedEpisodeMove]) {
+        var revised = settings
+        for key in revised.keys {
+            revised[key]?.moveEpisodes(plan)
+        }
+        guard revised != settings else { return }
+        settings = revised
+        if let data = try? JSONEncoder().encode(settings) {
+            UserDefaults.standard.set(data, forKey: "classicSyncSettings")
+        }
+        discardPreview()
+    }
+
     func discardPreview() {
         playbackPreview = nil
         playbackConflict = nil
@@ -264,9 +277,25 @@ final class DeviceManager: ObservableObject {
         await prepare(device, library: library, retry: request.retry, playbackChoices: resolved)
     }
 
-    func hasPlaybackImports(for id: UUID) -> Bool {
-        plannedDevice == id && playbackPreview?.imports.isEmpty == false
+    func playbackImportCount(for id: UUID) -> Int {
+        plannedDevice == id ? playbackPreview?.imports.count ?? 0 : 0
     }
+
+    func playbackImportItems(for id: UUID) -> [SyncItem] {
+        guard plannedDevice == id, let playbackPreview else { return [] }
+        return playbackPreview.imports.map { change in
+            var item = SyncItem(.importBookmark, change.title, "Copy playback progress to this Mac")
+            item.metadataChanges = [
+                SyncMetadataChange(field: "Position", before: Format.duration(Double(change.macState.milliseconds) / 1000),
+                                   after: Format.duration(Double(change.iPodState.milliseconds) / 1000)),
+                SyncMetadataChange(field: "Finished", before: change.macState.played ? "Yes" : "No",
+                                   after: change.iPodState.played ? "Yes" : "No")
+            ].filter { $0.before != $0.after }
+            return item
+        }
+    }
+
+    func hasPlaybackImports(for id: UUID) -> Bool { playbackImportCount(for: id) > 0 }
 
     func prepare(_ device: ClassicDevice, library: LibraryStore, retry: Set<URL>? = nil,
                  playbackChoices: [String: PlaybackProgressSync.Selection] = [:]) async {
@@ -327,6 +356,7 @@ final class DeviceManager: ObservableObject {
         let selectedURLs = Set(tracks.map { root.appendingPathComponent($0.id) })
         let fillURLs = Set(fillGroups.flatMap { $0 }).subtracting(selectedURLs)
         let retention = selection.podcastRetention ?? [:]
+        let unresolvedRelink = !library.missingRelinkPaths.isEmpty
         let podcasts = selection.podcasts ? library.tracks.compactMap { track -> (URL, String)? in
             guard let show = track.podcastShow, selection.podcastNames.contains(show) else { return nil }
             let pinned = retention[show]?.pinned.contains(track.id) == true
@@ -376,6 +406,7 @@ final class DeviceManager: ObservableObject {
         for match in matches {
             if let url = library.url(forID: match.id) { options.listening[url] = nil }
         }
+        if retry == nil { options.episodeCorrections = library.episodeCorrections() }
         options.expectedListening = playback.expected
         options.existingListening = playback.desired
         options.artwork = true
@@ -398,8 +429,8 @@ final class DeviceManager: ObservableObject {
         options.removedPlaylists = selection.music ? managedPlaylists.subtracting(
             (selection.selectedMusic ? options.playlists.map(\.id) : playlists.map(\.id))
         ) : []
-        options.reconcileMusic = selection.music && selection.selectedMusic && selection.fillRemainingSpace != true
-        if retry != nil {
+        options.reconcileMusic = selection.music && selection.selectedMusic && selection.fillRemainingSpace != true && !unresolvedRelink
+        if retry != nil || unresolvedRelink {
             options.playlists = []
             options.removedPlaylists = []
             options.reconcileMusic = false
@@ -441,8 +472,8 @@ final class DeviceManager: ObservableObject {
                     guard let policy = retention[show], policy.unplayedOnly == true || policy.limit != nil else { continue }
                     syncOptions.podcastLimits[show] = PodcastSyncLimit(
                         latest: policy.limit ?? Int.max, pinned: Set(policy.pinned.map { root.appendingPathComponent($0) }),
-                        removeOlder: retry == nil && policy.limit != nil && !failedShows.contains(show),
-                        removePlayed: retry == nil && policy.unplayedOnly == true && !failedShows.contains(show),
+                        removeOlder: retry == nil && !unresolvedRelink && policy.limit != nil && !failedShows.contains(show),
+                        removePlayed: retry == nil && !unresolvedRelink && policy.removesFinished && !failedShows.contains(show),
                         unplayed: policy.unplayedOnly == true
                     )
                 }
@@ -463,6 +494,9 @@ final class DeviceManager: ObservableObject {
                     if failure.reason != "Unsupported audio file type." { item.sourceURL = failure.url }
                     return item
                 }
+                if unresolvedRelink {
+                    skipped.append(SyncItem(.skip, "Automatic removals and playlist updates", "Some media files are still missing after relinking."))
+                }
                 if settings.reconcileMusic && !syncOptions.reconcileMusic {
                     skipped.append(SyncItem(.skip, "Music removals", "Some selected songs could not be read."))
                 }
@@ -474,8 +508,15 @@ final class DeviceManager: ObservableObject {
                 })
                 let deviceWatched = automaticShows.isEmpty ? [] :
                     try SyncEngine.readPlays(on: device.value, includeVideo: true).filter { $0.kind == .tvShow && $0.played }
-                let watchedKeys = Set(deviceWatched.compactMap(\.videoSyncKey))
-                if !automaticShows.isEmpty { syncOptions.expectedWatchedTVKeys = watchedKeys }
+                if !automaticShows.isEmpty { syncOptions.expectedWatchedTVKeys = Set(deviceWatched.compactMap(\.videoSyncKey)) }
+                let videoKeysByURL = Dictionary(uniqueKeysWithValues: videoItems.map { (root.appendingPathComponent($0.id), $0.classicTVKey) })
+                let corrections = syncOptions.episodeCorrections
+                let watchedKeys = Set(deviceWatched.compactMap { play in
+                    let target = corrections.first { correction in
+                        correction.transfers.contains { $0.matches(path: play.filePath, size: play.fileSize) }
+                    }?.target
+                    return target.flatMap { videoKeysByURL[$0] } ?? play.videoSyncKey
+                })
                 let tvGroups = Dictionary(grouping: videoItems.filter { $0.kind == .tv }, by: \.show)
                 var automaticIDs = Set<String>()
                 var watchedOnIPod = Set<URL>()
@@ -493,7 +534,7 @@ final class DeviceManager: ObservableObject {
                     let wanted = Set(eligible.prefix(max(0, min(100, limit))).map(\.id)).union(rule.pinned)
                     let distinctEpisodes = Dictionary(grouping: episodes, by: \.classicTVKey).filter { $0.value.count == 1 }
                     automaticIDs.formUnion(wanted)
-                    if retry == nil {
+                    if retry == nil && !unresolvedRelink {
                         syncOptions.retainedTVKeys.formUnion(episodes.filter { wanted.contains($0.id) }.map(\.classicTVKey))
                         syncOptions.expiredTVKeys.formUnion(distinctEpisodes.values.compactMap { versions in
                             versions.first.flatMap { wanted.contains($0.id) ? nil : $0.classicTVKey }
@@ -549,12 +590,12 @@ final class DeviceManager: ObservableObject {
             plannedDevice = device.id
             playbackPreview = playback
             let hasImports = !playback.imports.isEmpty
-            plan = preview.hasChanges || hasImports || !preview.items.isEmpty || !skipped.isEmpty ? preview : nil
+            plan = preview
             self.skipped = skipped
             if preview.hasChanges || hasImports {
                 status = !preview.hasChanges || preview.canFit ? "Sync preview ready" : "Not enough free space to apply this preview"
             } else {
-                status = plan == nil ? "iPod library is up to date" : "No changes to apply · See preview details"
+                status = preview.items.isEmpty && skipped.isEmpty ? "iPod library is up to date" : "No changes to apply · See preview details"
                 if !skipped.isEmpty { saveReport(for: device, items: skipped + preview.items) }
                 savePlaybackBaseline(device, states: playback.expected)
             }
@@ -754,7 +795,7 @@ final class DeviceManager: ObservableObject {
                !report.contains(where: { $0.action == .skip && ["iPod database", "iPod Play Counts"].contains($0.title) }) {
                 let imports = playback.imports.filter { library.isCurrentListening($0) }
                 library.applyListeningChanges(imports)
-                report += imports.map { SyncItem(.metadata, $0.title, "Imported playback progress from iPod") }
+                report += imports.map { SyncItem(.importBookmark, $0.title, "Imported playback progress from iPod") }
                 if let actual = try? await Task.detached(operation: { try SyncEngine.readPlays(on: device.value, includeVideo: true) }).value {
                     let current = library.listeningChanges(actual.filter { $0.kind != .music }, includeMatching: true)
                     let agreed = Dictionary(current.filter { $0.macState.matches($0.iPodState) }.map {
@@ -766,7 +807,7 @@ final class DeviceManager: ObservableObject {
             let reconciled = Set(playback?.matches.compactMap { library.url(forID: $0.id) } ?? [])
             if !stop.isRequested, !played.isEmpty, !report.contains(where: { $0.title == "iPod database" && $0.action == .skip }) {
                 let library = LibraryStore.shared
-                for track in library.tracks where library.url(for: track).map { played.contains($0) && !reconciled.contains($0) } == true {
+                for track in library.tracks where library.url(for: track).map({ played.contains($0) && !reconciled.contains($0) }) == true {
                     library.saveListening(track.id, position: 0, finished: true)
                 }
             }

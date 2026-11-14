@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 struct ClassicDevicePage: View {
+    @Environment(\.interfaceTextSize) private var textSize
     private enum Tab: String, CaseIterable {
         case summary = "Summary", music = "Music", movies = "Movies", tv = "TV Shows"
         case podcasts = "Podcasts", audiobooks = "Audiobooks", contents = "On This iPod"
@@ -21,8 +22,19 @@ struct ClassicDevicePage: View {
     @State private var search = ""
     @State private var contentType = ClassicMediaKind.music
     @State private var selectedContents = Set<Int>()
-    @State private var showingReport = false
-    @State private var reportIsResult = false
+    private enum Details: Identifiable {
+        case preview([SyncItem])
+        case results(DeviceSyncReport)
+
+        var id: Int {
+            switch self {
+            case .preview: 0
+            case .results: 1
+            }
+        }
+    }
+
+    @State private var details: Details?
     @State private var listeningChanges: [ListeningChange] = []
     @State private var showingListening = false
     @State private var retainedShow: String?
@@ -63,21 +75,20 @@ struct ClassicDevicePage: View {
                 }
                 footer(device, plan: plan)
             }
-            .font(Theme.listFont(12))
+            .font(textSize.font(12))
             .background(.white)
             .onChange(of: tab) { search = "" }
             .onChange(of: contentType) { selectedContents = [] }
-            .sheet(isPresented: $showingReport) {
-                if reportIsResult {
-                    if let report = devices.lastReports[device.value.settingsID] {
-                        SyncDetailsSheet(title: "Sync Results", items: report.items, report: report,
-                                         retry: !library.isScanning && !library.isScanningVideos && library.libraryRoot != nil && report.items.contains { $0.action == .skip && $0.sourceURL != nil } ? {
-                            showingReport = false
-                            Task { await devices.retryFailures(device, library: library, report: report) }
-                        } : nil)
-                    }
-                } else if let plan {
-                    SyncDetailsSheet(title: "Sync Preview", items: plan.items + devices.skipped)
+            .sheet(item: $details) { detail in
+                switch detail {
+                case .preview(let items):
+                    SyncDetailsSheet(title: "Sync Preview", items: items)
+                case .results(let report):
+                    SyncDetailsSheet(title: "Sync Results", items: report.items, report: report,
+                                     retry: !library.isScanning && !library.isScanningVideos && library.libraryRoot != nil && report.items.contains { $0.action == .skip && $0.sourceURL != nil } ? {
+                        details = nil
+                        Task { await devices.retryFailures(device, library: library, report: report) }
+                    } : nil)
                 }
             }
             .sheet(isPresented: $showPodcastDownload) { PodcastDownloadSheet(library: library) }
@@ -118,7 +129,7 @@ struct ClassicDevicePage: View {
             ForEach(Tab.allCases, id: \.self) { item in
                 Button { tab = item } label: {
                     Text(item.rawValue)
-                        .font(Theme.listBoldFont(11))
+                        .font(textSize.bold(11))
                         .fixedSize()
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(tab == item ? Theme.hex(0xC0C0C0) : .clear, in: Capsule())
@@ -129,7 +140,7 @@ struct ClassicDevicePage: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .frame(height: 27)
+        .frame(height: 27 + textSize.extra)
         .background(Theme.chrome)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.chromeLine).frame(height: 1) }
     }
@@ -137,7 +148,7 @@ struct ClassicDevicePage: View {
     private func summary(_ device: ClassicDevice) -> some View {
         let value = device.value
         return VStack(alignment: .leading, spacing: 13) {
-            Text(value.name).font(Theme.listBoldFont(16))
+            Text(value.name).font(textSize.bold(16))
             panel {
                 HStack(alignment: .top, spacing: 19) {
                     Image(systemName: "ipod").font(.system(size: 64, weight: .light))
@@ -157,7 +168,7 @@ struct ClassicDevicePage: View {
                     }
                 }
             }
-            Text("Options").font(Theme.listBoldFont(14))
+            Text("Options").font(textSize.bold(14))
             panel {
                 VStack(alignment: .leading, spacing: 7) {
                     Toggle("Sync only checked songs and videos", isOn: setting(\.checkedOnly, device))
@@ -438,23 +449,41 @@ struct ClassicDevicePage: View {
         )
         return VStack(alignment: .leading, spacing: 6) {
             Picker("Keep", selection: Binding(
-                get: { policy.wrappedValue.unplayedOnly == true ? "unplayed" : policy.wrappedValue.limit == nil ? "manual" : "latest" },
+                get: {
+                    let value = policy.wrappedValue
+                    if value.unplayedOnly == true { return value.limit == nil ? "unplayed" : "catchup" }
+                    return value.limit == nil ? "manual" : "latest"
+                },
                 set: { mode in
                     var value = policy.wrappedValue
-                    value.unplayedOnly = mode == "unplayed"
-                    value.limit = mode == "latest" ? 5 : nil
+                    let unplayed = mode == "unplayed" || mode == "catchup"
+                    if value.unplayedOnly != true && unplayed { value.removeFinished = false }
+                    if !unplayed { value.removeFinished = nil }
+                    value.unplayedOnly = unplayed ? true : nil
+                    value.limit = mode == "latest" || mode == "catchup" ? value.limit ?? 5 : nil
                     policy.wrappedValue = value
                 }
             )) {
                 Text("All checked episodes").tag("manual")
                 Text("Latest episodes").tag("latest")
-                Text("Unplayed episodes").tag("unplayed")
+                Text("All unplayed episodes").tag("unplayed")
+                Text("Catch Up").tag("catchup")
             }
             if let limit = policy.wrappedValue.limit {
-                Stepper("Keep latest \(limit) episodes", value: Binding(
-                    get: { policy.wrappedValue.limit ?? 5 },
-                    set: { policy.wrappedValue.limit = $0 }
-                ), in: 1...max(100, episodes.count, limit))
+                let unplayed = policy.wrappedValue.unplayedOnly == true
+                Stepper(unplayed ? "Keep latest \(limit) unplayed episodes" : "Keep latest \(limit) episodes",
+                        value: Binding(
+                            get: { policy.wrappedValue.limit ?? 5 },
+                            set: { policy.wrappedValue.limit = $0 }
+                        ), in: 1...max(100, episodes.count, limit))
+            }
+            if policy.wrappedValue.unplayedOnly == true {
+                Toggle("Remove finished episodes from this iPod", isOn: Binding(
+                    get: { policy.wrappedValue.removesFinished },
+                    set: { policy.wrappedValue.removeFinished = $0 }
+                ))
+                Text("In-progress episodes are kept alongside the newest unplayed episodes.")
+                    .foregroundStyle(.secondary)
             }
             if policy.wrappedValue.limit != nil || policy.wrappedValue.unplayedOnly == true {
                 Text("Pinned episodes stay on this iPod. Sync Preview lists managed copies to remove.")
@@ -475,7 +504,7 @@ struct ClassicDevicePage: View {
 
     private func mediaHeading(_ title: String, count: String, enabled: Binding<Bool>) -> some View {
         HStack {
-            Toggle(title, isOn: enabled).font(Theme.listBoldFont(15)).disabled(devices.busy)
+            Toggle(title, isOn: enabled).font(textSize.bold(15)).disabled(devices.busy)
             Text(count).foregroundStyle(.secondary)
             Spacer()
             TextField("Filter", text: $search).frame(width: 160)
@@ -571,16 +600,17 @@ struct ClassicDevicePage: View {
         panel {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Sync Preview").bold()
-                Text("\((plan.pending.count - plan.videoReplacementCount).formatted()) to add · \(plan.alreadyOnDevice.formatted()) already on iPod")
-                if plan.videoReplacementCount > 0 { Text("\(plan.videoReplacementCount.formatted()) converted videos to replace") }
-                if plan.bytes > 0 { Text("\(Format.bytes(plan.bytes)) to copy") }
-                if plan.removedTrackCount > 0 {
-                    Text("\(plan.removedTrackCount.formatted()) media items to remove · \(Format.bytes(plan.reclaimableBytes)) to free")
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                    previewCount("Files to copy", plan.pending.count,
+                                 detail: plan.bytes > 0 ? Format.bytes(plan.bytes) : "")
+                    previewCount("Media to remove", plan.removedTrackCount,
+                                 detail: plan.reclaimableBytes > 0 ? "\(Format.bytes(plan.reclaimableBytes)) to free" : "")
+                    previewCount("Metadata and artwork", plan.metadataUpdateCount, detail: "existing media items")
+                    previewCount("Bookmarks to iPod", plan.bookmarkUpdateCount)
+                    previewCount("Bookmarks to Mac", devices.playbackImportCount(for: id))
                 }
-                if plan.podcastUpdateCount > 0 { Text("\(plan.podcastUpdateCount.formatted()) existing podcast episodes to update") }
-                if plan.videoReleaseDateUpdateCount > 0 { Text("\(plan.videoReleaseDateUpdateCount.formatted()) video release dates to update") }
-                if plan.videoTitleUpdateCount > 0 { Text("\(plan.videoTitleUpdateCount.formatted()) video titles to update") }
-                if plan.videoDescriptionUpdateCount > 0 { Text("\(plan.videoDescriptionUpdateCount.formatted()) video descriptions to update") }
+                .padding(.vertical, 4)
+                if plan.videoReplacementCount > 0 { Text("\(plan.videoReplacementCount.formatted()) copies replace older video encodes") }
                 if plan.repairsPodcastIndex { Text("Repair Podcasts index on the iPod") }
                 if plan.artworkCandidates > 0 { Text("\(plan.artworkCandidates.formatted()) items to check for artwork") }
                 if plan.removedVideoArtworkCount > 0 { Text("\(plan.removedVideoArtworkCount.formatted()) video covers to clear") }
@@ -589,12 +619,18 @@ struct ClassicDevicePage: View {
                 if !plan.removedDefaultPlaylistNames.isEmpty {
                     Text(plan.removedDefaultPlaylistNames.joined(separator: ", ")).foregroundStyle(.secondary)
                 }
-                if plan.retagCount > 0 { Text("\(plan.retagCount.formatted()) tracks to retag") }
                 if !devices.skipped.isEmpty { Text("\(devices.skipped.count.formatted()) items skipped") }
                 if plan.hasChanges && !plan.canFit { Label("The iPod is low on free space.", systemImage: "exclamationmark.triangle") }
-                if devices.hasPlaybackImports(for: id) { Text("Playback progress will also be imported to this Mac.") }
-                else if !plan.hasChanges { Text("No changes to apply") }
+                if !devices.hasPlaybackImports(for: id) && !plan.hasChanges { Text("No changes to apply") }
             }
+        }
+    }
+
+    private func previewCount(_ label: String, _ count: Int, detail: String = "") -> some View {
+        GridRow {
+            Text(label)
+            Text(count.formatted()).monospacedDigit().bold().gridColumnAlignment(.trailing)
+            Text(detail).foregroundStyle(.secondary)
         }
     }
 
@@ -603,31 +639,47 @@ struct ClassicDevicePage: View {
             if !devices.status.isEmpty {
                 Text(devices.status).lineLimit(1).foregroundStyle(.secondary)
             }
-            HStack(spacing: 8) {
-                capacity(device.value)
-                if !devices.busy, let plan, !plan.items.isEmpty || !devices.skipped.isEmpty {
-                    Button("View Preview…") { reportIsResult = false; showingReport = true }.buttonStyle(ChromeButtonStyle())
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    capacity(device.value).frame(minWidth: 100)
+                    footerActions(device, plan: plan)
                 }
-                if !devices.busy, devices.lastReports[device.value.settingsID] != nil {
-                    Button("Last Results…") { reportIsResult = true; showingReport = true }.buttonStyle(ChromeButtonStyle())
-                }
-                if devices.canStop {
-                    Button("Stop Sync & Save") { devices.stopAndSave() }.buttonStyle(ChromeButtonStyle())
-                } else if let plan, plan.hasChanges || devices.hasPlaybackImports(for: id), !devices.busy {
-                    Button("Clear Preview") { devices.discardPreview() }.buttonStyle(ChromeButtonStyle())
-                    Button("Apply") { confirming = true }
-                        .buttonStyle(PillButtonStyle(prominent: true))
-                        .disabled(plan.hasChanges && !plan.canFit)
-                } else {
-                    Button("Preview Sync") { Task { await devices.prepare(device, library: library) } }
-                        .buttonStyle(PillButtonStyle(prominent: true))
-                        .disabled(devices.busy || library.isScanning || library.isScanningVideos || library.libraryRoot == nil || device.value.syncIssue != nil)
+                VStack(alignment: .trailing, spacing: 8) {
+                    capacity(device.value)
+                    HStack(spacing: 8) { footerActions(device, plan: plan) }
                 }
             }
         }
         .padding(10)
         .background(Theme.statusBar)
         .overlay(alignment: .top) { Rectangle().fill(Theme.chromeLine).frame(height: 1) }
+    }
+
+    @ViewBuilder
+    private func footerActions(_ device: ClassicDevice, plan: SyncPlan?) -> some View {
+        if !devices.busy, let plan, !plan.items.isEmpty || !devices.skipped.isEmpty || devices.hasPlaybackImports(for: id) {
+            Button("View Preview…") {
+                details = .preview(plan.items + devices.playbackImportItems(for: id) + devices.skipped)
+            }.buttonStyle(ChromeButtonStyle())
+        }
+        if !devices.busy, let report = devices.lastReports[device.value.settingsID] {
+            Button("Last Results…") { details = .results(report) }.buttonStyle(ChromeButtonStyle())
+        }
+        if devices.canStop {
+            Button("Stop Sync & Save") { devices.stopAndSave() }.buttonStyle(ChromeButtonStyle())
+        } else if let plan, plan.hasChanges || devices.hasPlaybackImports(for: id), !devices.busy {
+            Button("Clear Preview") { devices.discardPreview() }.buttonStyle(ChromeButtonStyle())
+            Button("Apply") { confirming = true }
+                .buttonStyle(PillButtonStyle(prominent: true))
+                .disabled(plan.hasChanges && !plan.canFit)
+        } else {
+            if plan != nil && !devices.busy {
+                Button("Clear Preview") { devices.discardPreview() }.buttonStyle(ChromeButtonStyle())
+            }
+            Button("Preview Sync") { Task { await devices.prepare(device, library: library) } }
+                .buttonStyle(PillButtonStyle(prominent: true))
+                .disabled(devices.busy || library.isScanning || library.isScanningVideos || library.libraryRoot == nil || device.value.syncIssue != nil)
+        }
     }
 
     private func capacity(_ device: Device) -> some View {
@@ -650,14 +702,14 @@ struct ClassicDevicePage: View {
                     }
                 }
                 Text("\(Format.bytes(device.available)) Free")
-                    .font(Theme.listBoldFont(10))
+                    .font(textSize.bold(10))
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.trailing, 7)
             }
             .clipShape(RoundedRectangle(cornerRadius: 3))
             .overlay { RoundedRectangle(cornerRadius: 3).strokeBorder(Theme.chromeLine.opacity(0.6)) }
         }
-        .frame(height: 18)
+        .frame(height: 18 + textSize.extra)
         .accessibilityLabel("\(Format.bytes(device.available)) free of \(Format.bytes(device.capacity))")
     }
 
@@ -738,7 +790,7 @@ struct ClassicDevicePage: View {
             .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         return VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(title).font(Theme.listBoldFont(13))
+                Text(title).font(textSize.bold(13))
                 Spacer()
                 Button("Select All") { selection.wrappedValue.formUnion(visible.map(\.key)) }
                     .buttonStyle(.plain).foregroundStyle(.blue).disabled(visible.isEmpty)
@@ -754,7 +806,7 @@ struct ClassicDevicePage: View {
                         }))
                         .lineLimit(1)
                         .padding(.horizontal, 6)
-                        .frame(height: 20)
+                        .frame(height: 20 + textSize.extra)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(index.isMultiple(of: 2) ? Theme.hex(0xEDF1F7) : .white)
                     }
@@ -814,7 +866,8 @@ private struct SyncDetailsSheet: View {
                 TextField("Filter items", text: $filter)
             }
             if visible.isEmpty {
-                ContentUnavailableView("No Items", systemImage: "list.bullet")
+                ContentUnavailableView(items.isEmpty ? "No Changes to Report" : "No Matching Items", systemImage: "list.bullet")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(Array(visible.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .top, spacing: 12) {
@@ -823,7 +876,7 @@ private struct SyncDetailsSheet: View {
                             Text(item.title)
                             if !item.detail.isEmpty { Text(item.detail).font(.caption).foregroundStyle(.secondary) }
                             if let changes = item.metadataChanges, !changes.isEmpty {
-                                DisclosureGroup("Compare Metadata") { MetadataComparison(changes: changes) }
+                                DisclosureGroup(item.action == .bookmark || item.action == .importBookmark ? "Compare Progress" : "Compare Metadata") { MetadataComparison(changes: changes) }
                             }
                         }
                     }

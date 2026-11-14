@@ -3,6 +3,7 @@ import AppKit
 
 @MainActor
 struct MainView: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var library: LibraryStore
     @ObservedObject var player: PlayerEngine
     @ObservedObject var devices: DeviceManager
@@ -52,6 +53,8 @@ struct MainView: View {
         }
     }
 
+    @State private var showVideoHealth = false
+
     @ViewBuilder
     private var detail: some View {
         if library.libraryRoot == nil {
@@ -65,7 +68,12 @@ struct MainView: View {
             case .device(let id):
                 ClassicDevicePage(id: id, devices: devices, library: library)
             case .library, .podcasts, .audiobooks, .playlist, .smart, .partyShuffle, .health, .smartList:
-                if browser.showVisualizer {
+                if browser.source == .health && showVideoHealth {
+                    VStack(spacing: 0) {
+                        healthTabs
+                        VideoHealthView(library: library, search: browser.search)
+                    }
+                } else if browser.showVisualizer && browser.source != .health {
                     VisualizerView(player: player)
                 } else {
                     // Plain VStack + custom handles instead of VSplitView: NSSplitView-backed views can
@@ -73,7 +81,7 @@ struct MainView: View {
                     VStack(spacing: 0) {
                         if browser.source == .podcasts {
                             HStack {
-                                Text("Podcasts").font(Theme.listBoldFont(12))
+                                Text("Podcasts").font(textSize.bold(12))
                                 Spacer()
                                 Toggle("Unplayed", isOn: $browser.showUnplayedPodcasts).controlSize(.small)
                                 if !podcasts.shows.isEmpty {
@@ -95,31 +103,8 @@ struct MainView: View {
                                     .buttonStyle(ChromeButtonStyle())
                             }
                             .padding(.horizontal, 9)
-                            .frame(height: 28)
+                            .frame(height: 28 + textSize.extra)
                             .background(Theme.chrome)
-                            if !podcasts.status.isEmpty {
-                                Text(podcasts.status).font(.caption).foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 9).padding(.vertical, 4)
-                            }
-                        }
-                        if browser.source == .podcasts || browser.source == .audiobooks {
-                            let inProgress = browser.visible.filter {
-                                ($0.resumePosition ?? 0) > 0 && $0.finishedListening != true
-                            }
-                            if !inProgress.isEmpty {
-                                HStack {
-                                    Menu("Continue Listening") {
-                                        ForEach(inProgress) { track in
-                                            Button("\(track.title) · \(Format.duration(track.resumePosition ?? 0))") {
-                                                player.play(queue: [track.id], startAt: 0)
-                                            }
-                                        }
-                                    }
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                            }
                         }
                         if browser.showColumnBrowser && !browser.isListSource {
                             Group {
@@ -133,6 +118,7 @@ struct MainView: View {
                             SplitHandle(value: $browserHeight, range: 80...600)
                         }
                         if browser.source == .health {
+                            healthTabs
                             HealthBar(browser: browser, health: LibraryHealth.shared)
                         }
                         songList
@@ -143,6 +129,20 @@ struct MainView: View {
                 }
             }
         }
+    }
+
+    private var healthTabs: some View {
+        HStack {
+            Picker("Library Health", selection: $showVideoHealth) {
+                Text("Music").tag(false)
+                Text("TV & Movies").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            Spacer()
+        }
+        .padding(8)
+        .background(Theme.statusBar)
     }
 
     private func playVisible() {
@@ -156,7 +156,7 @@ struct MainView: View {
             VStack(spacing: 8) {
                 Image(systemName: "music.note.list").font(.system(size: 40, weight: .ultraLight))
                 Text("This playlist is empty.")
-                Text("Drag songs here, or right-click songs → Add to Playlist.").font(.system(size: 11))
+                Text("Drag songs here, or right-click songs → Add to Playlist.").font(.system(size: 11 + textSize.extra))
             }
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -229,24 +229,31 @@ func chooseLibraryFolder(_ library: LibraryStore) {
 
 @MainActor
 struct StatusBar: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var browser: BrowserModel
     @ObservedObject var library: LibraryStore
     @ObservedObject var player: PlayerEngine
     @ObservedObject var devices: DeviceManager
     @ObservedObject private var loudness = LoudnessAnalyzer.shared
+    @ObservedObject private var podcasts = PodcastSubscriptions.shared
 
     var body: some View {
         HStack(spacing: 6) {
-            Button { [browser] in
-                if NSEvent.modifierFlags.contains(.option) {
-                    SmartPlaylistEditor.shared.open { [weak browser] id in browser?.source = .smartList(id) }
-                } else {
+            Menu {
+                Button("Playlist") {
                     let id = library.createPlaylist(name: "untitled playlist")
                     browser.source = .playlist(id)
                 }
-            } label: { Image(systemName: "plus") }
-                .buttonStyle(ChromeButtonStyle(compact: true))
-                .help("Create a playlist (Option-click for a smart playlist)")
+                Button("Smart Playlist") {
+                    SmartPlaylistEditor.shared.open { [weak browser] id in browser?.source = .smartList(id) }
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .accessibilityLabel("Add Playlist")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Add a playlist or smart playlist")
             Button { player.shuffle.toggle() } label: { Image(systemName: "shuffle") }
                 .buttonStyle(ChromeButtonStyle(active: player.shuffle, compact: true))
                 .help("Shuffle")
@@ -259,9 +266,24 @@ struct StatusBar: View {
                 .buttonStyle(ChromeButtonStyle(active: browser.showArtwork, compact: true))
                 .help("Show or hide song artwork")
 
+            if browser.source == .podcasts || browser.source == .audiobooks {
+                let inProgress = browser.visible.filter { ($0.resumePosition ?? 0) > 0 && $0.finishedListening != true }
+                if !inProgress.isEmpty {
+                    Menu("Continue Listening") {
+                        ForEach(inProgress) { track in
+                            Button("\(track.title) · \(Format.duration(track.resumePosition ?? 0))") {
+                                player.play(queue: [track.id], startAt: 0)
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+
             Spacer()
             Text(centerText)
-                .font(Theme.listFont(11))
+                .font(textSize.font(11))
                 .foregroundStyle(Theme.hex(0x333333))
                 .lineLimit(1)
             Spacer()
@@ -281,7 +303,7 @@ struct StatusBar: View {
                 .help("Eject the selected device")
         }
         .padding(.horizontal, 8)
-        .frame(height: 30)
+        .frame(height: 30 + textSize.extra)
         .background(Theme.statusBar)
         .overlay(alignment: .top) { Rectangle().fill(Theme.chromeLine).frame(height: 1) }
     }
@@ -296,11 +318,13 @@ struct StatusBar: View {
     }
 
     private var centerText: String {
-        let rg = LoudnessAnalyzer.shared
-        if rg.running { return "Measuring loudness: \(rg.done.formatted()) of \(rg.total.formatted()) songs" }
+        if loudness.running {
+            return "Measuring loudness: \(loudness.done.formatted()) of \(loudness.total.formatted()) songs"
+        }
         if case .device(let id) = browser.source, let device = devices.device(id)?.value {
             return "\(device.trackCount.formatted()) items on device · \(Format.bytes(device.available)) free"
         }
+        if browser.source == .podcasts && !podcasts.status.isEmpty { return podcasts.status }
         return browser.summary
     }
 }

@@ -258,6 +258,7 @@ struct Database {
                 videoReleaseDates: [String: Int] = [:],
                 videoTitles: [String: String] = [:],
                 videoDescriptions: [String: String] = [:],
+                episodeNumbers: [String: EpisodeCorrection] = [:],
                 removedVideoArtwork: Set<String> = [],
                 listening: [String: ClassicListeningState] = [:],
                 rebuildPodcastIndex: Bool = false,
@@ -352,6 +353,11 @@ struct Database {
                     data.put(try resolveAlbum(track.fields[3] ?? "", track.fields[4] ?? ""), at: 0x120)
                 }
                 if artist != nil, record.header >= 0x1e4 { data.put(0, at: 0x1e0) }
+            }
+            if let correction = episodeNumbers[path] {
+                guard record.header >= 0xdc else { throw SyncError("This iPod track cannot store episode numbers.") }
+                data.put(correction.season, at: 0xd4)
+                data.put(correction.episode, at: 0xd8)
             }
             if record.header >= Self.releaseDateOffset + 4,
                let release = Self.releaseTimestamp(video?.song.releaseDate ?? podcast?.releaseDate)

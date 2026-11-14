@@ -69,7 +69,7 @@ struct SongTable: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        context.coordinator.sync()
+        context.coordinator.sync(textSize: context.environment.interfaceTextSize)
     }
 }
 
@@ -157,15 +157,18 @@ final class SongTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             .store(in: &cancellables)
     }
 
-    func sync() {
+    func sync(textSize: InterfaceTextSize) {
         guard let table, let browser else { return }
+        let resized = table.updateTextSize(textSize)
         let newRows = browser.visible
         if newRows != rows {
             rows = newRows
             rowIndex = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
             table.reloadData()
-        } else if library.unchecked != lastUnchecked {
+        } else if library.unchecked != lastUnchecked || resized {
+            updatingSelection = true
             table.reloadData()
+            updatingSelection = false
         }
         lastUnchecked = library.unchecked
 
@@ -281,6 +284,7 @@ final class SongTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case "artist", "album":
             let cell = linkCell(tableView, id: id)
+            cell.textField?.font = ITStyle.font((tableView as? ITTableView)?.textSize ?? .standard)
             cell.textField?.stringValue = id == "artist" ? t.artist : t.album
             cell.textField?.textColor = checked ? ITStyle.text : ITStyle.dimText
             if let link = cell.subviews.compactMap({ $0 as? NSButton }).first {
@@ -293,6 +297,7 @@ final class SongTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         default:
             let cell = makeTextCell(tableView, id: id)
+            cell.textField?.font = ITStyle.font((tableView as? ITTableView)?.textSize ?? .standard)
             cell.textField?.stringValue = text(for: id, t)
             cell.textField?.alignment = SongColumn.all.first { $0.id == id }?.alignment ?? .left
             cell.textField?.textColor = checked ? ITStyle.text : ITStyle.dimText
@@ -638,7 +643,7 @@ final class SongTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
         let cell = NSTableCellView()
         cell.identifier = ident
         let tf = NSTextField(labelWithString: "")
-        tf.font = ITStyle.font
+        tf.font = ITStyle.font()
         tf.lineBreakMode = .byTruncatingTail
         tf.translatesAutoresizingMaskIntoConstraints = false
         tf.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

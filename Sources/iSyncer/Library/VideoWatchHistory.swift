@@ -26,6 +26,27 @@ final class VideoWatchHistory: ObservableObject {
         return entries[url.standardizedFileURL.path] ?? State()
     }
 
+    func relink(from old: URL, to new: URL, paths: Set<String>) {
+        guard old != new else { return }
+        var changed = false
+        for id in paths {
+            let from = old.appendingPathComponent(id).standardizedFileURL.path
+            let to = new.appendingPathComponent(id).standardizedFileURL.path
+            guard let state = entries[from], state.updated > (entries[to]?.updated ?? .distantPast) else { continue }
+            entries[to] = state
+            changed = true
+        }
+        if changed { persist(); watchedRevision += 1 }
+    }
+
+    func move(_ moves: [EpisodeMove]) {
+        let original = entries
+        for move in moves { entries.removeValue(forKey: move.source.standardizedFileURL.path) }
+        for move in moves { entries[move.destination.standardizedFileURL.path] = original[move.source.standardizedFileURL.path] }
+        persist()
+        watchedRevision += 1
+    }
+
     func update(_ url: URL, seconds: Double, duration: Double, watched: Bool? = nil) {
         let previous = state(at: url)
         let next = State(seconds: seconds.isFinite ? max(0, seconds) : previous.seconds,
@@ -33,6 +54,10 @@ final class VideoWatchHistory: ObservableObject {
                          watched: watched ?? previous.watched, updated: Date())
         entries[url.standardizedFileURL.path] = next
         if next.watched != previous.watched { watchedRevision += 1 }
+        persist()
+    }
+
+    private func persist() {
         if let data = try? JSONEncoder().encode(entries) {
             UserDefaults.standard.set(data, forKey: "videoWatchHistory")
         }
@@ -42,6 +67,19 @@ final class VideoWatchHistory: ObservableObject {
 extension VideoItem {
     var classicTVKey: String {
         Song.videoSyncKey(tv: true, show: show, season: season, episode: episode, title: title)
+    }
+
+    static func upNext(in episodes: [Self], state: (Self) -> VideoWatchHistory.State)
+        -> (episode: Self, position: Double)? {
+        let unwatched = episodes.sorted(by: episodeOrder).compactMap { episode -> (Self, VideoWatchHistory.State)? in
+            let progress = state(episode)
+            return progress.watched ? nil : (episode, progress)
+        }
+        let resumable = unwatched.filter { $0.1.seconds > 0 }
+        if let (episode, progress) = resumable.min(by: { $0.1.updated > $1.1.updated }) {
+            return (episode, progress.seconds)
+        }
+        return unwatched.first.map { (episode: $0.0, position: 0) }
     }
 
     static func episodeOrder(_ a: Self, _ b: Self) -> Bool {

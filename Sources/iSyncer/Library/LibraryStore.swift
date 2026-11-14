@@ -17,12 +17,33 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var unchecked: Set<String> = []
     @Published private(set) var libraryRoot: URL?
     @Published private(set) var isScanning = false
+    @Published private(set) var missingRelinkPaths: Set<String> = []
     @Published private(set) var scanStatus = ""
     /// Videos found in the media library (TV / Movies / …), synced in the layout Y2-Rockbox indexes.
     @Published private(set) var videos: [VideoItem] = []
     @Published private(set) var uncheckedVideos: Set<String> = []
     @Published private(set) var isScanningVideos = false
     @Published private(set) var videoMetadataRevision = 0
+
+    private var legacyVideoRoots: [URL] = []
+    private var missingRelinkTracks: [String: Track] = [:]
+    private struct EpisodeSource: Codable {
+        let url: URL
+        let size: Int
+        let date: Date
+
+        @MainActor var transfer: EpisodeTransferIdentity {
+            ClassicVideoConversion.transferIdentity(for: url, size: size, date: date,
+                in: LibraryStore.supportFolder.appendingPathComponent("Classic Videos", isDirectory: true))
+        }
+    }
+
+    private var episodeSources: [String: [EpisodeSource]] = [:]
+    private var videoMetadataLocations: [String: URL] = [:]
+    private var videoMetadataScannedIDs = Set<String>()
+    private var videoMetadataStore: VideoMetadataStore {
+        VideoMetadataStore(folder: Self.supportFolder.appendingPathComponent("Video Metadata", isDirectory: true))
+    }
 
     private var index: [String: Int] = [:]
     private var saveTask: Task<Void, Never>?
@@ -50,6 +71,10 @@ final class LibraryStore: ObservableObject {
         var smartLists: [SmartPlaylist]?
         var devicePlayTotals: [String: Int]? = nil
         var replacedTrackPaths: [String: String]? = nil
+        var missingRelinkPaths: Set<String>? = nil
+        var missingRelinkTracks: [String: Track]? = nil
+        var legacyVideoRoots: [URL]? = nil
+        var episodeSources: [String: [EpisodeSource]]? = nil
     }
 
     // MARK: Load / save
@@ -69,6 +94,10 @@ final class LibraryStore: ObservableObject {
         smartLists = saved.smartLists ?? []
         devicePlayTotals = saved.devicePlayTotals ?? [:]
         replacedTrackPaths = saved.replacedTrackPaths ?? [:]
+        missingRelinkPaths = saved.missingRelinkPaths ?? []
+        missingRelinkTracks = saved.missingRelinkTracks ?? [:]
+        legacyVideoRoots = saved.legacyVideoRoots ?? []
+        episodeSources = saved.episodeSources ?? [:]
         rebuildIndex()
     }
 
@@ -152,7 +181,8 @@ final class LibraryStore: ObservableObject {
     private func makeSaved() -> Saved {
         Saved(root: libraryRoot?.path, tracks: tracks, playlists: playlists, unchecked: Array(unchecked),
               videoRoot: nil, videos: videos, uncheckedVideos: Array(uncheckedVideos), smartLists: smartLists,
-              devicePlayTotals: devicePlayTotals, replacedTrackPaths: replacedTrackPaths)
+              devicePlayTotals: devicePlayTotals, replacedTrackPaths: replacedTrackPaths,
+              missingRelinkPaths: missingRelinkPaths, missingRelinkTracks: missingRelinkTracks, legacyVideoRoots: legacyVideoRoots, episodeSources: episodeSources)
     }
 
     // MARK: Videos
@@ -161,12 +191,20 @@ final class LibraryStore: ObservableObject {
         guard let root = libraryRoot, !isScanningVideos else { return }
         isScanningVideos = true
         let store = self
+        let metadata = videoMetadataStore
+        let previous = videos
+        let legacyRoots = legacyVideoRoots
         Task.detached(priority: .userInitiated) {
             let found = VideoScanner.scan(root: root)
+            let locations = metadata.resolve(found, root: root, previous: previous, legacyRoots: legacyRoots)
             await MainActor.run {
+                store.videoMetadataLocations = locations
                 store.videos = found
                 let ids = Set(found.map(\.id))
-                store.uncheckedVideos = store.uncheckedVideos.filter { ids.contains($0) }
+                store.videoMetadataScannedIDs = ids
+                store.missingRelinkPaths.subtract(ids)
+                store.videoMetadataRevision += 1
+                store.uncheckedVideos.formIntersection(ids.union(store.missingRelinkPaths))
                 store.isScanningVideos = false
                 store.scheduleSave()
             }
@@ -192,13 +230,80 @@ final class LibraryStore: ObservableObject {
     }
 
     func videoMetadata(for url: URL) -> VideoMetadataEdit? {
-        guard let data = try? Data(contentsOf: videoMetadataURL(for: url)) else { return nil }
-        return try? PropertyListDecoder().decode(VideoMetadataEdit.self, from: data)
+        let metadata = videoMetadataStore
+        let id = libraryRoot.flatMap { Scanner.relativePath(of: url, rootPath: $0.standardizedFileURL.path) }
+        if let id {
+            if let location = videoMetadataLocations[id] { return metadata.read(location) }
+            if videoMetadataScannedIDs.contains(id) { return nil }
+        }
+        return metadata.read(metadata.legacyLocation(for: url))
     }
 
     func saveVideoMetadata(_ metadata: VideoMetadataEdit, for url: URL) throws {
         try writeVideoMetadata(metadata, for: url)
         videoMetadataRevision += 1
+    }
+
+    func episodeCorrections() -> [EpisodeCorrection] {
+        videos.compactMap { item in
+            guard let history = episodeSources[item.id], let prior = history.last,
+                  let url = url(forVideo: item),
+                  let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                  let size = values.fileSize, let date = values.contentModificationDate,
+                  prior.size == size, prior.date == date else { return nil }
+            let current = EpisodeSource(url: url, size: size, date: date)
+            return EpisodeCorrection(target: url, season: item.season, episode: item.episode,
+                                     transfers: (history + [current]).map(\.transfer))
+        }
+    }
+
+    func renumberEpisode(_ draft: VideoItem, season: Int, episode: Int, saving metadata: VideoMetadataEdit) throws {
+        try organizeEpisodes([EpisodeNumberEdit(video: draft, season: season, episode: episode)], metadata: metadata)
+    }
+
+    func planEpisodeMoves(_ edits: [EpisodeNumberEdit]) throws -> [PlannedEpisodeMove] {
+        guard let root = libraryRoot else { throw SyncError("Choose a media library first.") }
+        return try EpisodeNumberEdit.plan(edits, videos: videos, root: root)
+    }
+
+    func organizeEpisodes(_ edits: [EpisodeNumberEdit], metadata: VideoMetadataEdit? = nil) throws {
+        guard !isScanning, !isScanningVideos, !DeviceManager.shared.busy, let root = libraryRoot else {
+            throw SyncError("Wait for the current scan or sync to finish.")
+        }
+        let plan = try planEpisodeMoves(edits)
+        guard !plan.isEmpty else { return }
+        let sources = try plan.map { move in
+            let values = try move.files.source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            guard let size = values.fileSize, let date = values.contentModificationDate,
+                  Int64(size) == move.previous.size, date.timeIntervalSince1970 == move.previous.modified else {
+                throw SyncError("The episode file changed. Rescan the library and try again.")
+            }
+            return EpisodeSource(url: move.files.source, size: size, date: date)
+        }
+        let edits = plan.map { move in metadata ?? videoMetadata(for: move.files.source) }
+        try EpisodeMove.perform(plan.map(\.files), in: root) {
+            for (move, edit) in zip(plan, edits) {
+                if let edit { try writeVideoMetadata(edit, for: move.files.destination, retireLegacy: false) }
+            }
+        }
+        let prior = episodeSources
+        let oldUnchecked = uncheckedVideos
+        let oldIDs = Set(plan.map { $0.previous.id })
+        episodeSources = episodeSources.filter { !oldIDs.contains($0.key) }
+        uncheckedVideos.subtract(oldIDs)
+        videoMetadataLocations = videoMetadataLocations.filter { !oldIDs.contains($0.key) }
+        for (move, source) in zip(plan, sources) {
+            episodeSources[move.updated.id] = (prior[move.previous.id] ?? []) + [source]
+            if oldUnchecked.contains(move.previous.id) { uncheckedVideos.insert(move.updated.id) }
+            try? FileManager.default.removeItem(at: videoMetadataStore.legacyLocation(for: move.files.source))
+        }
+        VideoWatchHistory.shared.move(plan.map(\.files))
+        DeviceManager.shared.moveEpisodeSettings(plan)
+        let replacements = Dictionary(uniqueKeysWithValues: plan.map { ($0.previous.id, $0.updated) })
+        videos = videos.map { replacements[$0.id] ?? $0 }
+        videoMetadataRevision += 1
+        scanVideos()
+        saveNowBlocking()
     }
 
     func saveEpisodeMetadata(_ updates: [VideoDirectory.EpisodeUpdate]) -> (saved: Set<VideoItem.ID>, error: String?) {
@@ -230,19 +335,19 @@ final class LibraryStore: ObservableObject {
         return (saved, nil)
     }
 
-    private func writeVideoMetadata(_ metadata: VideoMetadataEdit, for url: URL) throws {
-        let destination = videoMetadataURL(for: url)
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
-        try encoder.encode(metadata).write(to: destination, options: .atomic)
-    }
-
-    private func videoMetadataURL(for url: URL) -> URL {
-        let key = SHA256.hash(data: Data(url.standardizedFileURL.path.precomposedStringWithCanonicalMapping.utf8))
-            .map { String(format: "%02x", $0) }.joined()
-        return Self.supportFolder.appending(path: "Video Metadata", directoryHint: .isDirectory)
-            .appending(path: key + ".plist")
+    private func writeVideoMetadata(_ metadata: VideoMetadataEdit, for url: URL, retireLegacy: Bool = true) throws {
+        guard !isScanningVideos, let root = libraryRoot,
+              let id = Scanner.relativePath(of: url, rootPath: root.standardizedFileURL.path),
+              let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
+            throw SyncError("Wait for the video scan to finish and try again.")
+        }
+        let storage = videoMetadataStore
+        let destination = try storage.contentLocation(for: url, size: Int64(size))
+        try storage.save(metadata, at: destination)
+        if retireLegacy {
+            try? FileManager.default.removeItem(at: storage.legacyLocation(for: url))
+            videoMetadataLocations[id] = destination
+        }
     }
 
     func isVideoChecked(_ id: String) -> Bool { !uncheckedVideos.contains(id) }
@@ -286,25 +391,53 @@ final class LibraryStore: ObservableObject {
     // MARK: Scanning
 
     func setRoot(_ url: URL) {
-        guard !isScanning else { return }
+        guard !isScanning, !isScanningVideos, !DeviceManager.shared.busy else { return }
+        if url != libraryRoot {
+            videoMetadataLocations = [:]
+            videoMetadataScannedIDs = []
+            missingRelinkPaths = []
+            missingRelinkTracks = [:]
+            legacyVideoRoots = []
+        }
         if let old = libraryRoot { migrate(from: old, to: url) }
         libraryRoot = url
         scheduleSave()
         scan()
     }
 
-    func relinkRoot(_ url: URL) throws {
-        guard !isScanning, !isScanningVideos, !DeviceManager.shared.busy, libraryRoot != nil,
-              try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-            throw SyncError("Finish the current operation and choose the moved library folder.")
+    private var relinkPaths: Set<String> {
+        Set(tracks.map(\.id)).union(videos.map(\.id)).union(missingRelinkPaths)
+    }
+
+    func previewRelink(_ url: URL) async throws -> LibraryRelink {
+        guard !isScanning, !isScanningVideos, !DeviceManager.shared.busy, let source = libraryRoot else {
+            throw SyncError("Finish the current operation before relinking the library.")
         }
-        let paths = tracks.map(\.id) + videos.map(\.id)
-        guard paths.allSatisfy({ FileManager.default.fileExists(atPath: url.appendingPathComponent($0).path) }) else {
-            throw SyncError("Choose the folder that contains all of the library’s existing relative paths.")
+        let paths = relinkPaths
+        return try await Task.detached {
+            try LibraryRelink.inspect(source: source, destination: url.standardizedFileURL, paths: paths)
+        }.value
+    }
+
+    func relinkRoot(_ preview: LibraryRelink) async throws {
+        let verified = try await previewRelink(preview.destination)
+        guard !isScanning, !isScanningVideos, !DeviceManager.shared.busy, libraryRoot == preview.source,
+              relinkPaths == preview.paths, verified.paths == preview.paths, verified.missing == preview.missing else {
+            throw SyncError("The library changed. Preview the relink again.")
         }
-        libraryRoot = url
-        saveNowBlocking()
+        guard preview.matched > 0 || preview.paths.isEmpty else {
+            throw SyncError("Choose a folder containing some of the library’s original relative paths.")
+        }
+        let missing = Set(preview.missing)
+        for track in tracks where missing.contains(track.id) { missingRelinkTracks[track.id] = track }
+        missingRelinkPaths = missing
+        VideoWatchHistory.shared.relink(from: preview.source, to: preview.destination, paths: preview.paths)
+        if preview.source != preview.destination && !legacyVideoRoots.contains(preview.source) {
+            legacyVideoRoots.insert(preview.source, at: 0)
+        }
+        libraryRoot = preview.destination
         scan()
+        saveNowBlocking()
     }
 
     func inboxMatchIndex() -> [[String]: [Track]] {
@@ -416,10 +549,11 @@ final class LibraryStore: ObservableObject {
         let oldPath = old.standardizedFileURL.path
         let newPath = new.standardizedFileURL.path
         guard oldPath != newPath, oldPath.hasPrefix(newPath + "/") else {
-            if oldPath != newPath { videos = []; uncheckedVideos = [] }
+            if oldPath != newPath { videos = []; uncheckedVideos = []; episodeSources = [:] }
             return
         }
         let prefix = String(oldPath.dropFirst(newPath.count + 1)) + "/"
+        episodeSources = Dictionary(uniqueKeysWithValues: episodeSources.map { (prefix + $0.key, $0.value) })
         replacedTrackPaths = Dictionary(uniqueKeysWithValues: replacedTrackPaths.map { (prefix + $0.key, prefix + $0.value) })
         tracks = tracks.map { t in
             var c = t
@@ -447,6 +581,7 @@ final class LibraryStore: ObservableObject {
         isScanning = true
         scanStatus = "Scanning library…"
         let existing = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            .merging(missingRelinkTracks) { current, _ in current }
         let aliases = replacedTrackPaths
 
         let store = self
@@ -464,16 +599,21 @@ final class LibraryStore: ObservableObject {
     private func apply(_ result: ScanResult) {
         tracks = result.tracks
         rebuildIndex()
-        unchecked = unchecked.filter { index[$0] != nil }
+        let found = Set(index.keys)
+        missingRelinkPaths.subtract(found)
+        missingRelinkTracks = missingRelinkTracks.filter { !found.contains($0.key) }
+        unchecked.formIntersection(found.union(missingRelinkPaths))
 
         // Mirror playlists found in the library folder.
         var updated = playlists.filter { pl in
             guard let src = pl.importedFrom else { return true }
-            return result.playlists.contains { $0.relativePath == src }
+            return result.playlists.contains { $0.relativePath == src } || pl.trackIDs.contains(where: missingRelinkPaths.contains)
         }
         for scanned in result.playlists {
             if let i = updated.firstIndex(where: { $0.importedFrom == scanned.relativePath }) {
-                updated[i].trackIDs = scanned.trackIDs
+                if missingRelinkPaths.isEmpty || !updated[i].trackIDs.contains(where: missingRelinkPaths.contains) {
+                    updated[i].trackIDs = scanned.trackIDs
+                }
             } else {
                 updated.append(Playlist(id: UUID(), name: scanned.name, trackIDs: scanned.trackIDs,
                                         importedFrom: scanned.relativePath))
@@ -613,25 +753,36 @@ final class LibraryStore: ObservableObject {
 
     static let smartPlaylistNames = ["Recently Added", "Recently Played", "Top 25 Most Played", "My Top Rated"]
 
-    func smartPlaylist(named name: String) -> Playlist? {
-        let ordered: [Track]
-        switch name {
-        case "My Top Rated":
-            ordered = tracks.filter { $0.rating >= 4 }
-                .sorted { $0.rating != $1.rating ? $0.rating > $1.rating : $0.playCount > $1.playCount }
-        case "Top 25 Most Played":
-            ordered = Array(tracks.filter { $0.playCount > 0 }
-                .sorted { $0.playCount != $1.playCount ? $0.playCount > $1.playCount : $0.lastPlayed > $1.lastPlayed }
-                .prefix(25))
-        case "Recently Played":
-            ordered = Array(tracks.filter { $0.lastPlayed > 0 }.sorted { $0.lastPlayed > $1.lastPlayed }.prefix(25))
-        case "Recently Added":
-            ordered = Array(tracks.sorted { $0.dateAdded != $1.dateAdded ? $0.dateAdded > $1.dateAdded : $0.id < $1.id }
-                .prefix(25))
-        default:
-            return nil
+    func builtInSmartList(named name: String) -> SmartPlaylist? {
+        guard let index = Self.smartPlaylistNames.firstIndex(of: name) else { return nil }
+        let ids = [
+            UUID(uuidString: "3ABC23E6-DAB7-4270-A637-63558FE29159")!,
+            UUID(uuidString: "84727F11-3C16-4DD9-93E4-B1093277685D")!,
+            UUID(uuidString: "CE383C15-2DE9-4F33-AD97-F38446FB4CE7")!,
+            UUID(uuidString: "507C8D45-AF6C-4D0C-9D62-3517568E0E91")!
+        ]
+        let id = ids[index]
+        if let saved = smartList(id) { return saved }
+        var list = SmartPlaylist()
+        list.id = id
+        list.name = name
+        list.syncToIPod = false
+        list.limitEnabled = index != 3
+        list.selectedBy = [.mostRecentlyAdded, .mostRecentlyPlayed, .mostOftenPlayed, .highestRating][index]
+        if index == 3 { list.sortWithoutLimit = true }
+        list.rules = []
+        if index > 0 {
+            var rule = SmartRule()
+            rule.field = [.dateAdded, .lastPlayed, .playCount, .rating][index]
+            rule.op = index == 1 ? .isSet : .greater
+            rule.number = index == 3 ? 3 : 0
+            list.rules = [rule]
         }
-        return Playlist(id: UUID(), name: name, trackIDs: ordered.map(\.id), importedFrom: nil)
+        return list
+    }
+
+    func smartPlaylist(named name: String) -> Playlist? {
+        builtInSmartList(named: name).map(asPlaylist)
     }
 
     // MARK: Ratings, play counts, edited files
@@ -681,10 +832,15 @@ final class LibraryStore: ObservableObject {
             })
             for key in keys { videoKeys[key, default: []].append(video) }
         }
+        let corrections = episodeCorrections()
+        let videoByURL = Dictionary(uniqueKeysWithValues: videos.compactMap { video in url(forVideo: video).map { ($0, video) } })
         let changes = plays.compactMap { play -> ListeningChange? in
             let position = Double(play.bookmarkMilliseconds) / 1000
-            if let key = play.videoSyncKey, let video = videoKeys[key]?.only(where: { _ in true }),
-               let url = url(forVideo: video) {
+            let corrected = play.kind == .tvShow ? corrections.only { correction in
+                correction.transfers.contains { $0.matches(path: play.filePath, size: play.fileSize) }
+            }.flatMap { videoByURL[$0.target] } : nil
+            let normal = play.videoSyncKey.flatMap { videoKeys[$0]?.only { _ in true } }
+            if let video = corrected ?? normal, let url = url(forVideo: video) {
                 let state = VideoWatchHistory.shared.state(at: url)
                 guard includeMatching || abs(state.seconds - position) >= 0.5 || state.watched != play.played else { return nil }
                 return ListeningChange(local: .video(video, url, state), play: play, position: position)
@@ -786,7 +942,16 @@ final class LibraryStore: ObservableObject {
 
     /// User smart playlists as plain playlists (for syncing to a device).
     func smartListsAsPlaylists() -> [Playlist] {
-        smartLists.map { Playlist(id: $0.id, name: $0.name, trackIDs: $0.evaluate(tracks, unchecked: unchecked), importedFrom: nil) }
+        smartLists.filter { $0.syncToIPod != false }.map(asPlaylist)
+    }
+
+    var customSmartLists: [SmartPlaylist] {
+        let builtInIDs = Set(Self.smartPlaylistNames.compactMap { builtInSmartList(named: $0)?.id })
+        return smartLists.filter { !builtInIDs.contains($0.id) }
+    }
+
+    private func asPlaylist(_ list: SmartPlaylist) -> Playlist {
+        Playlist(id: list.id, name: list.name, trackIDs: list.evaluate(tracks, unchecked: unchecked), importedFrom: nil)
     }
 
     /// Stores measured ReplayGain values (dB gains, linear peaks).

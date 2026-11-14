@@ -12,6 +12,13 @@ enum SourceSelection: Hashable {
     case audiobooks
     case health
     case smartList(UUID)
+
+    var isSmartPlaylist: Bool {
+        switch self {
+        case .smart, .smartList: return true
+        default: return false
+        }
+    }
 }
 
 /// What the song list shows: source + search + column browser + sort, computed once per change
@@ -110,13 +117,13 @@ final class BrowserModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 if self.source == .partyShuffle { self.recompute() }
-                if case .smartList = self.source { self.recompute() }
+                if self.source.isSmartPlaylist { self.recompute() }
             }
             .store(in: &cancellables)
         library.$smartLists
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                guard let self, case .smartList = self.source else { return }
+                guard let self, self.source.isSmartPlaylist else { return }
                 self.recompute()
             }
             .store(in: &cancellables)

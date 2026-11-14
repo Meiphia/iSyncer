@@ -10,15 +10,48 @@ struct iSyncerApp: App {
     @State private var showPodcastDownload = false
     @State private var showInbox = false
     @State private var relinkError: String?
+    @State private var relinkPreview: LibraryRelink?
+    @State private var relinking = false
 
     var body: some Scene {
         Window("iSyncer", id: "main") {
             MainView(library: .shared, player: .shared, devices: .shared, browser: browser)
                 .sheet(isPresented: $showPodcastDownload) { PodcastDownloadSheet(library: .shared) }
                 .sheet(isPresented: $showInbox) { ImportInbox(library: .shared) }
+                .sheet(item: $relinkPreview) { preview in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Relink Media Folder").font(.headline)
+                        Text(preview.destination.path).textSelection(.enabled)
+                        Text("\(preview.matched.formatted()) matched · \(preview.missing.count.formatted()) missing")
+                        if !preview.missing.isEmpty {
+                            Text("Missing files can be restored to the listed paths later. Automatic device removals and playlist updates are paused while files are missing.")
+                                .foregroundStyle(.secondary)
+                            List(preview.missing, id: \.self) { Text($0).textSelection(.enabled) }
+                                .frame(height: 200)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Cancel") { relinkPreview = nil }.keyboardShortcut(.cancelAction)
+                            Button("Relink") {
+                                relinkPreview = nil
+                                relinking = true
+                                Task {
+                                    defer { relinking = false }
+                                    do { try await library.relinkRoot(preview) }
+                                    catch { relinkError = error.localizedDescription }
+                                }
+                            }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(preview.matched == 0 && !preview.paths.isEmpty)
+                        }
+                    }
+                    .padding(20)
+                    .frame(width: 560)
+                }
                 .alert("Could Not Relink Library", isPresented: Binding(
                     get: { relinkError != nil }, set: { if !$0 { relinkError = nil } }
                 )) { Button("OK") { relinkError = nil } } message: { Text(relinkError ?? "") }
+                .interfaceTypography()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 720)
@@ -42,8 +75,8 @@ struct iSyncerApp: App {
                     .keyboardShortcut("r")
                 Button("Import Inbox…") { showInbox = true }
                     .disabled(library.libraryRoot == nil)
-                Button("Relink Moved Library…") { relink() }
-                    .disabled(library.libraryRoot == nil)
+                Button("Relink Media Folder…") { relink() }
+                    .disabled(library.libraryRoot == nil || library.isScanning || library.isScanningVideos || relinking)
                 Button("Download Podcast from RSS…") { showPodcastDownload = true }
                 Divider()
                 Button("Analyze Loudness (ReplayGain)") { LoudnessAnalyzer.shared.analyze() }
@@ -120,7 +153,7 @@ struct iSyncerApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView().interfaceTypography()
         }
     }
 
@@ -130,8 +163,12 @@ struct iSyncerApp: App {
         panel.canChooseFiles = false
         panel.prompt = "Relink Library"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try LibraryStore.shared.relinkRoot(url) }
-        catch { relinkError = error.localizedDescription }
+        relinking = true
+        Task {
+            defer { relinking = false }
+            do { relinkPreview = try await library.previewRelink(url) }
+            catch { relinkError = error.localizedDescription }
+        }
     }
 }
 

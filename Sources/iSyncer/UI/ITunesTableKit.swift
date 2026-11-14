@@ -5,9 +5,11 @@ import SwiftUI
 /// blue-white stripes, a flat blue selection, glossy grey headers (blue on the sorted column),
 /// 11 pt Lucida Grande.
 enum ITStyle {
-    static let font: NSFont = NSFont(name: "LucidaGrande", size: 11) ?? .systemFont(ofSize: 11)
-    static let boldFont: NSFont = NSFont(name: "LucidaGrande-Bold", size: 11) ?? .boldSystemFont(ofSize: 11)
-    static let smallFont: NSFont = NSFont(name: "LucidaGrande", size: 10) ?? .systemFont(ofSize: 10)
+    static func font(_ textSize: InterfaceTextSize = .standard, bold: Bool = false) -> NSFont {
+        let size = 11 + textSize.extra
+        let fallback = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
+        return NSFont(name: bold ? "LucidaGrande-Bold" : "LucidaGrande", size: size) ?? fallback
+    }
 
     static func rgb(_ v: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
@@ -55,6 +57,21 @@ enum ITStyle {
 /// Table with the striped background drawn all the way down, even below the last row.
 final class ITTableView: NSTableView {
     var onKey: ((NSEvent) -> Bool)?
+
+    private(set) var textSize = InterfaceTextSize.standard
+
+    func updateTextSize(_ size: InterfaceTextSize) -> Bool {
+        guard textSize != size else { return false }
+        textSize = size
+        rowHeight = ITStyle.rowHeight + size.extra
+        if let headerView {
+            headerView.frame.size.height = 17 + size.extra
+            headerView.needsDisplay = true
+        }
+        for column in tableColumns { column.headerCell.font = ITStyle.font(size) }
+        tile()
+        return true
+    }
 
     override func drawBackground(inClipRect clipRect: NSRect) {
         NSColor.white.setFill()
@@ -122,10 +139,12 @@ final class ITHeaderCell: NSTableHeaderCell {
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byTruncatingTail
         para.alignment = alignment
-        let attrs: [NSAttributedString.Key: Any] = [.font: ITStyle.font, .foregroundColor: NSColor.black, .paragraphStyle: para]
+        let typeface = font ?? ITStyle.font()
+        let textHeight = ceil(typeface.ascender - typeface.descender) + 1
+        let attrs: [NSAttributedString.Key: Any] = [.font: typeface, .foregroundColor: NSColor.black, .paragraphStyle: para]
         let reserve: CGFloat = sortState == 0 ? 0 : 12
-        let textRect = NSRect(x: cellFrame.minX + 5, y: cellFrame.minY + (cellFrame.height - 14) / 2,
-                              width: max(0, cellFrame.width - 10 - reserve), height: 14)
+        let textRect = NSRect(x: cellFrame.minX + 5, y: cellFrame.minY + (cellFrame.height - textHeight) / 2,
+                              width: max(0, cellFrame.width - 10 - reserve), height: textHeight)
         (stringValue as NSString).draw(in: textRect, withAttributes: attrs)
 
         if sortState != 0 {
@@ -177,7 +196,7 @@ final class ClosureMenuItem: NSMenuItem {
 
 func makeHeaderCell(_ title: String) -> ITHeaderCell {
     let cell = ITHeaderCell(textCell: title)
-    cell.font = ITStyle.font
+    cell.font = ITStyle.font()
     return cell
 }
 
@@ -207,7 +226,7 @@ func makeTextCell(_ table: NSTableView, id: String) -> NSTableCellView {
     let cell = NSTableCellView()
     cell.identifier = ident
     let tf = NSTextField(labelWithString: "")
-    tf.font = ITStyle.font
+    tf.font = ITStyle.font()
     tf.lineBreakMode = .byTruncatingTail
     tf.cell?.truncatesLastVisibleLine = true
     tf.translatesAutoresizingMaskIntoConstraints = false
@@ -279,9 +298,12 @@ struct ITColumnList: NSViewRepresentable {
         guard let table = c.table else { return }
         (table.tableColumns.first?.headerCell as? ITHeaderCell)?.stringValue = title
         let rows = [ITListItem(id: Self.allID, label: "\(allLabel) (\(items.count.formatted()))")] + items
-        if rows != c.rows {
+        let resized = (table as? ITTableView)?.updateTextSize(context.environment.interfaceTextSize) == true
+        if rows != c.rows || resized {
             c.rows = rows
+            c.updating = true
             table.reloadData()
+            c.updating = false
         }
         var want = IndexSet(rows.indices.filter { selection.contains(rows[$0].id) })
         if want.isEmpty { want = IndexSet(integer: 0) }
@@ -306,7 +328,7 @@ struct ITColumnList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = makeTextCell(tableView, id: "list")
             cell.textField?.stringValue = rows[row].label
-            cell.textField?.font = row == 0 ? ITStyle.boldFont : ITStyle.font
+            cell.textField?.font = ITStyle.font((tableView as? ITTableView)?.textSize ?? .standard, bold: row == 0)
             return cell
         }
 
@@ -397,7 +419,7 @@ struct PersistentSplit: NSViewRepresentable {
         split.delegate = context.coordinator
         context.coordinator.panes = panes
         for (i, p) in panes.enumerated() {
-            let host = NSHostingView(rootView: p.view)
+            let host = NSHostingView(rootView: context.environment.interfaceTextSize.apply(to: p.view))
             host.sizingOptions = []
             host.autoresizingMask = [.width, .height]
             split.addArrangedSubview(host)
@@ -415,7 +437,7 @@ struct PersistentSplit: NSViewRepresentable {
     func updateNSView(_ split: NSSplitView, context: Context) {
         context.coordinator.panes = panes
         for (i, p) in panes.enumerated() where i < split.arrangedSubviews.count {
-            (split.arrangedSubviews[i] as? NSHostingView<AnyView>)?.rootView = p.view
+            (split.arrangedSubviews[i] as? NSHostingView<AnyView>)?.rootView = context.environment.interfaceTextSize.apply(to: p.view)
         }
     }
 

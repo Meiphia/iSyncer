@@ -21,6 +21,7 @@ public struct DevicePlayCount: Equatable, Sendable {
     public let enclosure: String
     public let videoSyncKey: String?
     public let filePath: String
+    public let fileSize: Int
 }
 
 public struct ClassicListeningState: Codable, Equatable, Sendable {
@@ -143,7 +144,7 @@ extension Database {
                                    played: recent > 0 || (includeVideo && kind == .tvShow && original.u32(start + 0x50) > 0) || markedPlayed,
                                    markedPlayed: markedPlayed, remembersPosition: record.header > 0xa6 && original[start + 0xa6] == 1,
                                    enclosure: track.fields[15] ?? "", videoSyncKey: kind == .tvShow || kind == .movie ? track.videoSyncKey : nil,
-                                   filePath: track.path.lowercased())
+                                   filePath: track.path.lowercased(), fileSize: track.size)
         }
     }
 }

@@ -6,6 +6,7 @@ import AppKit
 /// The traffic lights sit in the chrome's top-left corner; the empty chrome drags the window.
 @MainActor
 struct TopBar: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var player: PlayerEngine
     @ObservedObject var browser: BrowserModel
     @ObservedObject var library: LibraryStore
@@ -15,10 +16,10 @@ struct TopBar: View {
     var body: some View {
         VStack(spacing: 0) {
             Text("iSyncer")
-                .font(Theme.listFont(12))
+                .font(textSize.font(12))
                 .foregroundStyle(Theme.hex(0x2A2A2A))
                 .frame(maxWidth: .infinity)
-                .frame(height: 25)
+                .frame(height: 25 + textSize.extra)
                 .allowsHitTesting(false)
             HStack(alignment: .center, spacing: 12) {
                 VStack(spacing: 5) {
@@ -49,7 +50,7 @@ struct TopBar: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 4)
         }
-        .frame(height: 87)
+        .frame(height: 87 + 3 * textSize.extra)
         .background(WindowDragArea())
         .background(Theme.chrome)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.chromeLine).frame(height: 1) }
@@ -59,7 +60,7 @@ struct TopBar: View {
         VStack(spacing: 3) {
             content()
             Text(caption)
-                .font(Theme.listFont(10))
+                .font(textSize.font(10))
                 .foregroundStyle(Theme.hex(0x3A3A3A))
                 .shadow(color: .white.opacity(0.6), radius: 0, y: 1)
         }
@@ -98,7 +99,7 @@ struct TopBar: View {
             Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.hex(0x777777))
             TextField("", text: $browser.search)
                 .textFieldStyle(.plain)
-                .font(Theme.listFont(11))
+                .font(textSize.font(11))
             if !browser.search.isEmpty {
                 Button { browser.search = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.hex(0x9A9A9A))
@@ -146,7 +147,9 @@ struct BrowseEye: View {
 /// Lets the empty chrome drag the window (the title bar is hidden).
 struct WindowDragArea: NSViewRepresentable {
     final class DragView: NSView {
+        var acceptsInactiveDrag = false
         override var mouseDownCanMoveWindow: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { acceptsInactiveDrag }
         override func mouseDown(with event: NSEvent) {
             if event.clickCount == 2 {
                 window?.performMiniaturize(nil)
@@ -170,6 +173,7 @@ enum LCDMode: String {
 /// alternates artist and album), or a live spectrum; scan or sync progress when busy.
 @MainActor
 struct LCDDisplay: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var player: PlayerEngine
     @ObservedObject var library: LibraryStore
     @ObservedObject var devices: DeviceManager
@@ -195,14 +199,14 @@ struct LCDDisplay: View {
                 .padding(.horizontal, compact ? 8 : 12)
                 .padding(.vertical, 5)
         }
-        .frame(height: compact ? 44 : 54)
+        .frame(height: (compact ? 44 : 54) + 2 * textSize.extra)
     }
 
     @ViewBuilder
     private var content: some View {
         if devices.busy {
             VStack(spacing: 4) {
-                Text(devices.status).font(Theme.listFont(11)).lineLimit(1)
+                Text(devices.status).font(textSize.font(11)).lineLimit(1)
                 if let progress = devices.progress {
                     ScrubBar(fraction: progress, interactive: false).frame(height: 8)
                 } else {
@@ -231,7 +235,7 @@ struct LCDDisplay: View {
         } else if library.isScanning || !library.scanStatus.isEmpty {
             VStack(spacing: 4) {
                 Text(library.scanStatus.isEmpty ? "Scanning…" : library.scanStatus)
-                    .font(Theme.listFont(11))
+                    .font(textSize.font(11))
                     .foregroundStyle(Theme.lcdText)
                 if library.isScanning { ProgressView().controlSize(.small).progressViewStyle(.linear).frame(maxWidth: 260) }
             }
@@ -260,13 +264,13 @@ struct LCDDisplay: View {
         let second = [t.artist, t.album].filter { !$0.isEmpty }
         return VStack(spacing: 1) {
             Text(t.title)
-                .font(Theme.listFont(compact ? 10 : 11))
+                .font(textSize.font(compact ? 10 : 11))
                 .lineLimit(1)
             // Second line alternates between artist and album every few seconds.
             TimelineView(.periodic(from: .now, by: 3.5)) { ctx in
                 let i = second.isEmpty ? 0 : Int(ctx.date.timeIntervalSinceReferenceDate / 3.5) % second.count
                 Text(second.isEmpty ? " " : second[i])
-                    .font(Theme.listFont(compact ? 10 : 11))
+                    .font(textSize.font(compact ? 10 : 11))
                     .foregroundStyle(Theme.lcdDim)
                     .lineLimit(1)
                     .id(i)
@@ -299,7 +303,7 @@ struct LCDDisplay: View {
             Text(sample).hidden()
             Text(label)
         }
-        .font(Theme.listFont(10).monospacedDigit())
+        .font(textSize.font(10).monospacedDigit())
         .fixedSize(horizontal: true, vertical: false)
         .frame(minWidth: minWidth, alignment: alignment)
         .layoutPriority(1)

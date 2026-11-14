@@ -23,7 +23,7 @@ final class SmartPlaylistEditor: NSObject, NSWindowDelegate {
                 onSave?(saved.id)
             }
             w?.close()
-        })
+        }.interfaceTypography())
         w.center()
         window = w
         w.makeKeyAndOrderFront(nil)
@@ -36,6 +36,7 @@ final class SmartPlaylistEditor: NSObject, NSWindowDelegate {
 
 @MainActor
 private struct SmartPlaylistForm: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @State var list: SmartPlaylist
     let isNew: Bool
     let done: (SmartPlaylist?) -> Void
@@ -61,12 +62,14 @@ private struct SmartPlaylistForm: View {
                 VStack(spacing: 6) {
                     ForEach($list.rules) { $rule in
                         RuleRow(rule: $rule,
-                                canRemove: list.rules.count > 1,
                                 remove: { list.rules.removeAll { $0.id == rule.id } },
                                 add: {
                                     let i = (list.rules.firstIndex { $0.id == rule.id } ?? list.rules.count - 1) + 1
                                     list.rules.insert(SmartRule(), at: i)
                                 })
+                    }
+                    if list.rules.isEmpty {
+                        Button("Add Rule") { list.rules.append(SmartRule()) }
                     }
                 }
                 .padding(8)
@@ -83,15 +86,22 @@ private struct SmartPlaylistForm: View {
                     ForEach(SmartPlaylist.LimitUnit.allCases) { Text($0.label).tag($0) }
                 }
                 .labelsHidden().fixedSize()
-                Text("selected by")
-                Picker("", selection: $list.selectedBy) {
+                Text(list.limitEnabled ? "selected by" : "Sort by")
+                Picker("", selection: Binding(
+                    get: { list.limitEnabled || list.sortWithoutLimit == true ? list.selectedBy : .libraryOrder },
+                    set: {
+                        list.selectedBy = $0
+                        if !list.limitEnabled { list.sortWithoutLimit = $0 != .libraryOrder }
+                    }
+                )) {
                     ForEach(SmartPlaylist.SelectedBy.allCases) { Text($0.label).tag($0) }
                 }
                 .labelsHidden().fixedSize()
             }
-            .disabled(false)
             Toggle("Match only checked songs", isOn: $list.onlyChecked)
-            Toggle("Live updating", isOn: .constant(true)).disabled(true)
+            Toggle("Include in iPod sync", isOn: Binding(
+                get: { list.syncToIPod != false }, set: { list.syncToIPod = $0 }
+            ))
 
             HStack {
                 Text(matchSummary).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -100,14 +110,13 @@ private struct SmartPlaylistForm: View {
                 Button("OK") {
                     var saved = list
                     saved.name = saved.name.trimmingCharacters(in: .whitespaces).isEmpty ? "untitled smart playlist" : saved.name
-                    saved.seed = UInt64.random(in: 0...UInt64.max)   // a fresh random pick, like iTunes
                     done(saved)
                 }
                 .keyboardShortcut(.defaultAction)
             }
         }
         .toggleStyle(.checkbox)
-        .font(.system(size: 12))
+        .font(.system(size: 12 + textSize.extra))
         .padding(16)
         .frame(minWidth: 640, minHeight: 340)
         .preferredColorScheme(.light)
@@ -123,7 +132,6 @@ private struct SmartPlaylistForm: View {
 @MainActor
 private struct RuleRow: View {
     @Binding var rule: SmartRule
-    let canRemove: Bool
     let remove: () -> Void
     let add: () -> Void
 
@@ -159,7 +167,6 @@ private struct RuleRow: View {
             value
             Spacer(minLength: 4)
             Button { remove() } label: { Image(systemName: "minus") }
-                .disabled(!canRemove)
                 .help("Remove this rule")
             Button { add() } label: { Image(systemName: "plus") }
                 .help("Add a rule")
@@ -194,7 +201,7 @@ private struct RuleRow: View {
                     get: { Date(timeIntervalSince1970: rule.number) },
                     set: { rule.number = $0.timeIntervalSince1970 }), displayedComponents: .date)
                     .labelsHidden().fixedSize()
-            } else {
+            } else if [.inLast, .notInLast].contains(rule.op) {
                 HStack(spacing: 4) {
                     TextField("", value: $rule.number, format: .number).textFieldStyle(.roundedBorder).frame(width: 50)
                     Picker("", selection: $rule.unit) {

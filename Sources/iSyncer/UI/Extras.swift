@@ -15,6 +15,7 @@ struct AlbumSummary: Identifiable {
 /// The column browser's Album pane as a grid of covers (Show Album Artwork).
 @MainActor
 struct AlbumArtworkPane: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var browser: BrowserModel
     var onPlay: () -> Void
 
@@ -26,7 +27,7 @@ struct AlbumArtworkPane: View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
-                Text(browser.albumSel.isEmpty ? title : "\(title) — show all").font(Theme.listFont(11))
+                Text(browser.albumSel.isEmpty ? title : "\(title) — show all").font(textSize.font(11))
                 Spacer()
             }
             .contentShape(Rectangle())
@@ -42,7 +43,7 @@ struct AlbumArtworkPane: View {
                 }
             }
             .foregroundStyle(Theme.hex(0x222222))
-            .frame(height: 17)
+            .frame(height: 17 + textSize.extra)
             .background(Theme.glossyHeader)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.hex(0x8E8E8E)).frame(height: 1) }
             ScrollView {
@@ -70,6 +71,7 @@ struct AlbumArtworkPane: View {
 
 @MainActor
 struct AlbumTile: View {
+    @Environment(\.interfaceTextSize) private var textSize
     let album: AlbumSummary
     var highlighted = false
     var item = "song"
@@ -92,10 +94,10 @@ struct AlbumTile: View {
                                               lineWidth: highlighted ? 2 : 1))
             .shadow(color: .black.opacity(0.2), radius: 1.5, y: 1)
             Text(album.name.isEmpty ? "Unknown Album" : album.name)
-                .font(Theme.listBoldFont(10)).lineLimit(1)
+                .font(textSize.bold(10)).lineLimit(1)
             Text([album.year > 0 ? String(album.year) : nil,
                   "\(album.count) \(item)\(album.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · "))
-                .font(Theme.listFont(9)).foregroundStyle(Theme.hex(0x777777)).lineLimit(1)
+                .font(textSize.font(9)).foregroundStyle(Theme.hex(0x777777)).lineLimit(1)
         }
         .frame(width: 76)
         .foregroundStyle(Theme.hex(0x222222))
@@ -108,27 +110,28 @@ struct AlbumTile: View {
 
 @MainActor
 struct PartyShuffleBar: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var party: PartyShuffle
 
     var body: some View {
         HStack(spacing: 10) {
-            Text("Source: Library").font(Theme.listFont(10))
+            Text("Source: Library").font(textSize.font(10))
             Spacer()
-            Text("Display").font(Theme.listFont(10))
-            Text("\(party.recentCount) recently played").font(Theme.listFont(10)).foregroundStyle(Theme.hex(0x666666))
+            Text("Display").font(textSize.font(10))
+            Text("\(party.recentCount) recently played").font(textSize.font(10)).foregroundStyle(Theme.hex(0x666666))
             Picker("", selection: $party.upcomingCount) {
                 ForEach([5, 10, 15, 25, 50, 100], id: \.self) { Text("\($0)").tag($0) }
             }
             .labelsHidden()
             .controlSize(.mini)
             .frame(width: 60)
-            Text("upcoming songs").font(Theme.listFont(10))
+            Text("upcoming songs").font(textSize.font(10))
             Button("Refresh") { party.refresh() }
                 .controlSize(.mini)
         }
         .foregroundStyle(Theme.hex(0x222222))
         .padding(.horizontal, 10)
-        .frame(height: 24)
+        .frame(height: 24 + textSize.extra)
         .background(Theme.glossyHeader)
         .overlay(alignment: .top) { Rectangle().fill(Theme.hex(0xA0A0A0)).frame(height: 1) }
     }
@@ -294,6 +297,74 @@ struct EqualizerView: View {
 
 // MARK: - Mini player
 
+/// AppKit's title bar can add space to a short window when it is shown.
+final class MiniPlayerWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+@MainActor
+final class MiniPlayerContentView: NSView {
+    static let trafficLightsWidth: CGFloat = 68
+
+    init(hosting: NSView) {
+        super.init(frame: .zero)
+        let dragArea = WindowDragArea.DragView()
+        dragArea.acceptsInactiveDrag = true
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        dragArea.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hosting)
+        // Keep the drag area above the SwiftUI host so AppKit delivers the mouse event to it.
+        addSubview(dragArea)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
+            dragArea.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.trafficLightsWidth),
+            dragArea.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dragArea.topAnchor.constraint(equalTo: topAnchor),
+            dragArea.heightAnchor.constraint(equalToConstant: MiniPlayerController.trafficLightInset)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+@MainActor
+private struct MiniWindowButtons: NSViewRepresentable {
+    @MainActor final class Actions: NSObject {
+        @objc func close() { MiniPlayerController.shared.showMain() }
+        @objc func minimize(_ sender: NSButton) { sender.window?.miniaturize(nil) }
+        @objc func expand() { MiniPlayerController.shared.showMain() }
+    }
+
+    func makeCoordinator() -> Actions { Actions() }
+
+    func makeNSView(context: Context) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        let controls: [(NSWindow.ButtonType, Selector, String)] = [
+            (.closeButton, #selector(Actions.close), "Close Mini Player"),
+            (.miniaturizeButton, #selector(Actions.minimize(_:)), "Minimize"),
+            (.zoomButton, #selector(Actions.expand), "Back to the full window")
+        ]
+        for (type, action, label) in controls {
+            guard let button = NSWindow.standardWindowButton(type, for: [.titled, .closable, .miniaturizable, .resizable]) else { continue }
+            button.isEnabled = true
+            button.target = context.coordinator
+            button.action = action
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+            stack.addArrangedSubview(button)
+        }
+        return stack
+    }
+
+    func updateNSView(_ nsView: NSStackView, context: Context) {}
+}
+
 /// The green window button switches to a small always-on-top player, like iTunes did.
 /// Option-click zooms normally.
 @MainActor
@@ -303,7 +374,8 @@ final class MiniPlayerController: NSObject, NSWindowDelegate {
     var revealAlbum: ((Track) -> Void)?
     private var mini: NSWindow?
     static let width: CGFloat = 520
-    static let controlsHeight: CGFloat = 108
+    static let trafficLightInset: CGFloat = 29
+    static func controlsHeight(_ size: InterfaceTextSize) -> CGFloat { 108 + 2 * size.extra }
     static let lyricsHeight: CGFloat = 290
 
     @objc func toggleFromZoomButton(_ sender: Any?) {
@@ -323,40 +395,36 @@ final class MiniPlayerController: NSObject, NSWindowDelegate {
 
     func showMini() {
         if mini == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.controlsHeight),
-                             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            let w = MiniPlayerWindow(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.controlsHeight(.saved)),
+                             styleMask: [.borderless, .miniaturizable],
                              backing: .buffered, defer: false)
-            w.titleVisibility = .hidden
-            w.titlebarAppearsTransparent = true
+            w.title = "iSyncer Mini Player"
+            w.isOpaque = false
+            w.backgroundColor = .clear
+            w.hasShadow = true
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
             w.level = .floating
             w.appearance = NSAppearance(named: .aqua)
             w.delegate = self
-            let hosting = NSHostingView(rootView: MiniPlayerView(player: .shared, library: .shared, devices: .shared))
+            let hosting = NSHostingView(rootView: MiniPlayerView(player: .shared, library: .shared, devices: .shared).interfaceTypography())
             hosting.sizingOptions = []
-            w.contentView = hosting
-            if let zoom = w.standardWindowButton(.zoomButton) {
-                zoom.isEnabled = true
-                zoom.target = self
-                zoom.action = #selector(miniZoom(_:))
-                zoom.toolTip = "Back to the full window"
-            }
+            w.contentView = MiniPlayerContentView(hosting: hosting)
             w.setFrameAutosaveName("iSyncer.MiniPlayer")
             if !w.setFrameUsingName("iSyncer.MiniPlayer") { w.center() }
             mini = w
         }
         mainWindow?.orderOut(nil)
-        resizeForLyrics()
+        if mini?.isMiniaturized == true { mini?.deminiaturize(nil) }
         mini?.makeKeyAndOrderFront(nil)
+        resizeForLyrics()
     }
 
     func resizeForLyrics() {
         guard let w = mini else { return }
         let frame = w.frame
-        let height = Self.controlsHeight + (LyricsPresentation.shared.isVisible ? Self.lyricsHeight + 1 : 0)
-        var target = w.frameRect(forContentRect: NSRect(x: 0, y: 0, width: Self.width, height: height))
-        target.origin = NSPoint(x: frame.minX, y: frame.maxY - target.height)
+        let height = Self.controlsHeight(.saved) + (LyricsPresentation.shared.isVisible ? Self.lyricsHeight + 1 : 0)
+        var target = NSRect(x: frame.minX, y: frame.maxY - height, width: Self.width, height: height)
         if let visible = (w.screen ?? NSScreen.main)?.visibleFrame {
             target.origin.y = max(visible.minY, min(target.minY, visible.maxY - target.height))
         }
@@ -377,6 +445,7 @@ final class MiniPlayerController: NSObject, NSWindowDelegate {
 
 @MainActor
 struct MiniPlayerView: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var player: PlayerEngine
     @ObservedObject var library: LibraryStore
     @ObservedObject var devices: DeviceManager
@@ -395,10 +464,33 @@ struct MiniPlayerView: View {
             }
         }
         .frame(width: MiniPlayerController.width)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onChange(of: textSize) { MiniPlayerController.shared.resizeForLyrics() }
         .preferredColorScheme(.light)
     }
 
+    private var titleStrip: some View {
+        HStack(spacing: 0) {
+            MiniWindowButtons()
+                .frame(width: MiniPlayerContentView.trafficLightsWidth - 8, height: 18)
+                .padding(.leading, 8)
+            Spacer(minLength: 0)
+        }
+        .frame(height: MiniPlayerController.trafficLightInset)
+    }
+
     private var controls: some View {
+        VStack(spacing: 0) {
+            titleStrip
+            playbackControls
+                .padding(.bottom, 3)
+                .padding(.horizontal, 12)
+        }
+        .frame(width: MiniPlayerController.width, height: MiniPlayerController.controlsHeight(textSize), alignment: .top)
+        .background(Theme.chrome)
+    }
+
+    private var playbackControls: some View {
         VStack(spacing: 5) {
             HStack(spacing: 10) {
                 Button {
@@ -411,7 +503,7 @@ struct MiniPlayerView: View {
                         if let cover { Image(nsImage: cover).resizable().aspectRatio(contentMode: .fit) }
                         else { Image(systemName: "music.note").foregroundStyle(.secondary) }
                     }
-                    .frame(width: 52, height: 52)
+                    .frame(width: 46, height: 46)
                     .border(Theme.chromeLine)
                 }
                 .buttonStyle(.plain)
@@ -453,11 +545,6 @@ struct MiniPlayerView: View {
                     .accessibilityLabel("Volume")
             }
         }
-        .padding(.top, 18)
-        .padding(.horizontal, 12)
-        .frame(width: MiniPlayerController.width, height: MiniPlayerController.controlsHeight)
-        .background(Theme.chrome)
-        .preferredColorScheme(.light)
         .task(id: player.current?.id) {
             cover = nil
             guard let track = player.current else { return }
@@ -503,6 +590,7 @@ struct MiniPlayerView: View {
 
 @MainActor
 struct HealthBar: View {
+    @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var browser: BrowserModel
     @ObservedObject var health: LibraryHealth
 
@@ -517,11 +605,11 @@ struct HealthBar: View {
                         HStack(spacing: 4) {
                             Text(c.label)
                             Text(health.count(c).map { $0.formatted() } ?? "–")
-                                .font(Theme.listFont(10))
+                                .font(textSize.font(10))
                                 .padding(.horizontal, 5)
                                 .background(Capsule().fill((health.count(c) ?? 0) > 0 ? Color.orange.opacity(0.25) : Color.green.opacity(0.2)))
                         }
-                        .font(Theme.listFont(11))
+                        .font(textSize.font(11))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(RoundedRectangle(cornerRadius: 4)
@@ -540,7 +628,7 @@ struct HealthBar: View {
             }
             HStack(spacing: 8) {
                 Text(browser.healthCheck.explanation)
-                    .font(Theme.listFont(10))
+                    .font(textSize.font(10))
                     .foregroundStyle(Theme.hex(0x555555))
                     .lineLimit(2)
                 if browser.healthCheck == .noArtwork, let p = health.artworkProgress {
