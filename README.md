@@ -72,6 +72,11 @@ The sync engine matches existing tracks to avoid copying them again when possibl
 
 **Stop Sync & Save** commits completed transfers. **Last Results** explains what happened and can preview a retry of eligible failed items. **On This iPod** lists device contents and lets you recover selected media to the Mac or review video removals. **Summary** includes play-count import, ratings and listening-progress comparison, and database backups. Backups cover the device index. The restore preview checks that its referenced media files are still available.
 
+### Transfer playback progress
+
+Podcasts, audiobooks, TV episodes, and movies reconcile playback progress during **Preview Sync → Apply**. If only one device changed since the last sync, iSyncer uses that position automatically. If both devices have different progress, choose the Mac or iPod position when prompted. On the first sync, an item with progress on only one device uses that position.
+
+
 ## Last.fm, Discord, and service settings
 
 | Feature | Setup and data sent |

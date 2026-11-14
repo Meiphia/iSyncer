@@ -256,6 +256,7 @@ struct LCDDisplay: View {
     private func nowPlaying(_ t: Track) -> some View {
         let duration = max(player.duration, 0.01)
         let pos = scrubbing ?? player.position
+        let clockWidthSample = Format.duration(max(duration, pos))
         let second = [t.artist, t.album].filter { !$0.isEmpty }
         return VStack(spacing: 1) {
             Text(t.title)
@@ -272,9 +273,7 @@ struct LCDDisplay: View {
                     .transition(.opacity)
             }
             HStack(spacing: 5) {
-                Text(Format.duration(pos))
-                    .font(Theme.listFont(10).monospacedDigit())
-                    .frame(width: 38, alignment: .trailing)
+                clock(Format.duration(pos), reserving: clockWidthSample, minWidth: 38, alignment: .trailing)
                 ScrubBar(fraction: pos / duration) { f in
                     scrubbing = f * duration
                 } onEnd: { f in
@@ -282,9 +281,9 @@ struct LCDDisplay: View {
                     scrubbing = nil
                 }
                 .frame(height: 8)
-                Text(showRemaining ? "-" + Format.duration(duration - pos) : Format.duration(duration))
-                    .font(Theme.listFont(10).monospacedDigit())
-                    .frame(width: 42, alignment: .leading)
+                clock(showRemaining ? "-" + Format.duration(duration - pos) : Format.duration(duration),
+                      reserving: showRemaining ? "-" + clockWidthSample : clockWidthSample,
+                      minWidth: 42, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture { showRemaining.toggle() }
             }
@@ -293,6 +292,17 @@ struct LCDDisplay: View {
             }
         }
         .foregroundStyle(Theme.lcdText)
+    }
+
+    private func clock(_ label: String, reserving sample: String, minWidth: CGFloat, alignment: Alignment) -> some View {
+        ZStack(alignment: alignment) {
+            Text(sample).hidden()
+            Text(label)
+        }
+        .font(Theme.listFont(10).monospacedDigit())
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: minWidth, alignment: alignment)
+        .layoutPriority(1)
     }
 }
 

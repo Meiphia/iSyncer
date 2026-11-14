@@ -649,56 +649,113 @@ final class LibraryStore: ObservableObject {
         scheduleSave()
     }
 
-    func listeningChanges(_ plays: [DevicePlayCount]) -> [ListeningChange] {
+    func listeningChanges(_ plays: [DevicePlayCount], includeMatching: Bool = false) -> [ListeningChange] {
         func key(_ title: String, _ album: String) -> [String] {
             [title, album].map { $0.precomposedStringWithCanonicalMapping.lowercased() }
         }
-        var byTags: [[String]: [Track]] = [:]
+        let audio = Dictionary(grouping: tracks) { track in
+            key(track.title, track.podcastShow ?? track.audiobookTitle ?? track.album)
+        }
+        let spoken = tracks.filter { !$0.isMusic }
+        var byPath: [String: [Track]] = [:]
         var byEnclosure: [String: [Track]] = [:]
-        for track in tracks {
-            let show = track.podcastShow ?? track.audiobookTitle ?? track.album
-            byTags[key(track.title, show), default: []].append(track)
-            if track.podcastShow != nil, let url = url(for: track), let metadata = PodcastMetadata.load(for: url) {
+        var byRSSTags: [[String]: [Track]] = [:]
+        for track in spoken {
+            guard let url = url(for: track) else { continue }
+            let kind: ClassicMediaKind = track.podcastShow != nil ? .podcast : .audiobook
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                ?? Date(timeIntervalSince1970: track.modified)
+            let path = SyncEngine.transferPath(url, size: Int(track.size), date: date, kind: kind)
+            byPath[path.lowercased(), default: []].append(track)
+            if let show = track.podcastShow, let metadata = PodcastMetadata.load(for: url) {
                 byEnclosure[metadata.enclosure, default: []].append(track)
+                if let title = metadata.title { byRSSTags[key(title, show), default: []].append(track) }
             }
         }
+        var videoKeys: [String: [VideoItem]] = [:]
+        for video in videos {
+            let url = url(forVideo: video)
+            let title = url.flatMap { videoMetadata(for: $0)?.title } ?? video.title
+            let keys = Set([video.title, title].map {
+                Song.videoSyncKey(tv: video.kind == .tv, show: video.show, season: video.season, episode: video.episode, title: $0)
+            })
+            for key in keys { videoKeys[key, default: []].append(video) }
+        }
         let changes = plays.compactMap { play -> ListeningChange? in
-            let enclosure = byEnclosure[play.enclosure]?.only { _ in true }
-            let tagged = byTags[key(play.title, play.album)]?.only { track in
-                let kind: ClassicMediaKind = track.podcastShow != nil ? .podcast : track.audiobookTitle != nil ? .audiobook : .music
-                return kind == play.kind &&
-                    [track.artist, track.albumArtist].contains { $0.caseInsensitiveCompare(play.artist) == .orderedSame }
+            let position = Double(play.bookmarkMilliseconds) / 1000
+            if let key = play.videoSyncKey, let video = videoKeys[key]?.only(where: { _ in true }),
+               let url = url(forVideo: video) {
+                let state = VideoWatchHistory.shared.state(at: url)
+                guard includeMatching || abs(state.seconds - position) >= 0.5 || state.watched != play.played else { return nil }
+                return ListeningChange(local: .video(video, url, state), play: play, position: position)
             }
-            guard let track = (play.kind == .podcast ? enclosure : nil) ?? tagged else { return nil }
-            let position = min(track.duration, Double(play.bookmarkMilliseconds) / 1000)
+            let matches = audio[key(play.title, play.album)]?.filter { track in
+                let kind: ClassicMediaKind = track.podcastShow != nil ? .podcast : track.audiobookTitle != nil ? .audiobook : .music
+                return kind == play.kind
+            } ?? []
+            let credited = matches.only { track in
+                [track.artist, track.albumArtist].contains { $0.caseInsensitiveCompare(play.artist) == .orderedSame } ||
+                    (!play.albumArtist.isEmpty && track.displayAlbumArtist.caseInsensitiveCompare(play.albumArtist) == .orderedSame)
+            }
+            let fallback = play.kind == .music ? [] : matches + (byRSSTags[key(play.title, play.album)] ?? [])
+            let distinct = Dictionary(fallback.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let track = byPath[play.filePath]?.only { _ in true }
+                ?? byEnclosure[play.enclosure]?.only { _ in true }
+                ?? credited
+                ?? distinct.values.only { _ in true }
+            guard let track else { return nil }
             if play.kind == .music {
                 guard track.rating != play.rating else { return nil }
             } else {
-                guard abs((track.resumePosition ?? 0) - position) >= 1 ||
-                      (track.finishedListening ?? false) != play.played else { return nil }
+                guard includeMatching || abs((track.resumePosition ?? 0) - position) >= 0.5 ||
+                      (track.finishedListening ?? false) != (play.played && position == 0) else { return nil }
             }
-            return ListeningChange(track: track, play: play, position: position)
+            return ListeningChange(local: .audio(track), play: play, position: position)
         }
         let grouped = Dictionary(grouping: changes, by: \.id)
         return changes.filter { grouped[$0.id]?.count == 1 }
     }
 
+    func isCurrentListening(_ change: ListeningChange) -> Bool {
+        switch change.local {
+        case .audio(let audio):
+            guard let current = track(audio.id) else { return false }
+            return current.resumePosition == audio.resumePosition && current.finishedListening == audio.finishedListening
+        case .video(let video, let source, let state):
+            return source == url(forVideo: video) && VideoWatchHistory.shared.state(at: source) == state
+        }
+    }
+
     func applyListeningChanges(_ changes: [ListeningChange]) {
         var updated = tracks
+        var imported = Set<String>()
         for change in changes {
-            guard let i = index[change.id] else { continue }
-            if change.play.kind == .music {
-                guard updated[i].rating == change.track.rating else { continue }
-                updated[i].rating = change.play.rating
-            } else {
-                guard updated[i].resumePosition == change.track.resumePosition,
-                      updated[i].finishedListening == change.track.finishedListening else { continue }
-                updated[i].resumePosition = change.position
-                updated[i].finishedListening = change.play.played
+            switch change.local {
+            case .video(let video, let source, let state):
+                guard source == url(forVideo: video), VideoWatchHistory.shared.state(at: source) == state else { continue }
+                VideoWatchHistory.shared.update(source, seconds: change.position,
+                                                duration: Double(change.play.duration), watched: change.play.played)
+            case .audio(let track):
+                guard let i = index[track.id] else { continue }
+                if change.play.kind == .music {
+                    guard updated[i].rating == track.rating else { continue }
+                    updated[i].rating = change.play.rating
+                } else {
+                    guard updated[i].resumePosition == track.resumePosition,
+                          updated[i].finishedListening == track.finishedListening else { continue }
+                    updated[i].resumePosition = change.position
+                    updated[i].finishedListening = change.play.played && change.position == 0
+                    imported.insert(track.id)
+                }
             }
         }
-        tracks = updated
-        saveNowBlocking()
+        if updated != tracks {
+            tracks = updated
+            saveNowBlocking()
+        }
+        if let id = PlayerEngine.shared.current?.id, imported.contains(id) {
+            PlayerEngine.shared.refreshImportedListening(for: id)
+        }
     }
 
     func setRating(_ ids: [String], _ stars: Int) {

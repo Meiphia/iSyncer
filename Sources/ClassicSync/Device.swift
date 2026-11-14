@@ -236,8 +236,7 @@ public struct SyncPlan: Sendable {
     fileprivate let artworkSongs: [String: Song]
     fileprivate let listening: [String: ClassicListeningState]
     fileprivate let fillReserve: Int64
-    fileprivate let playLogSnapshot: Data?
-    fileprivate let podcastPlaySnapshots: [URL: Data?]
+    fileprivate let playbackSnapshots: [URL: Data?]
 }
 
 public struct ClassicRestorePreview: Sendable {
@@ -338,7 +337,7 @@ public enum SyncEngine {
         let layout = try DeviceLayout(device.mount)
         let (original, database, _) = try load(device, layout: layout)
         let playedOnlyShows = Set(options.podcastLimits.compactMap { $0.value.removePlayed ? $0.key.precomposedStringWithCanonicalMapping : nil })
-        let readsListening = options.expectedWatchedTVKeys != nil || options.podcastLimits.values.contains(where: \.unplayed)
+        let readsListening = options.expectedListening != nil || !options.existingListening.isEmpty || !options.listening.isEmpty || options.expectedWatchedTVKeys != nil || options.podcastLimits.values.contains(where: \.unplayed)
         let activePlayLog = layout.database.deletingLastPathComponent().appending(path: "Play Counts")
         let activePlayPlist = activePlayLog.deletingLastPathComponent().appending(path: "PlayCounts.plist")
         let playFiles = !readsListening ? [] : [activePlayLog, activePlayPlist].filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -346,8 +345,14 @@ public enum SyncEngine {
         let played = !readsListening ? [] : try database.devicePlays(
             playFiles.first == activePlayLog ? playSnapshots.first : nil,
             plist: playFiles.first == activePlayPlist ? playSnapshots.first : nil,
-            includeVideo: options.expectedWatchedTVKeys != nil
+            includeVideo: options.expectedListening != nil || !options.existingListening.isEmpty || !options.listening.isEmpty || options.expectedWatchedTVKeys != nil
         )
+        if let expected = options.expectedListening {
+            let current = Dictionary(played.map { ($0.id, $0.listeningState) }, uniquingKeysWith: { first, _ in first })
+            guard expected.allSatisfy({ current[$0.key] == $0.value }) else {
+                throw SyncError("iPod playback progress changed. Preview Sync again.")
+            }
+        }
         if let expected = options.expectedWatchedTVKeys,
            Set(played.filter { $0.kind == .tvShow && $0.played }.compactMap(\.videoSyncKey)) != expected {
             throw SyncError("iPod watching history changed. Preview Sync again.")
@@ -594,19 +599,37 @@ public enum SyncEngine {
         }
         let survivingPaths = Set(database.tracks.filter { !removedTracks.contains($0.id) }.map { $0.path.lowercased() })
         var countedPaths = Set<String>()
-        let playLog = layout.database.deletingLastPathComponent().appending(path: "Play Counts")
-        let snapshot = options.listening.isEmpty || !FileManager.default.fileExists(atPath: playLog.path)
-            ? nil : try Data(contentsOf: playLog)
-        let loggedListening = options.listening.isEmpty ? [] : try readPlays(on: device)
-        let loggedByID = Dictionary(loggedListening.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let listening = Dictionary(songs.compactMap { song -> (String, ClassicListeningState)? in
-            guard song.classification == .podcast || song.classification == .audiobook,
-                  let state = options.listening[song.id], let path = matchedPaths[song.id] else { return nil }
-            if let track = paths[path], let live = loggedByID[track.persistentID],
-               live.bookmarkMilliseconds == min(state.milliseconds, song.duration),
-               live.played == (state.played || live.recent > 0) { return nil }
+        let loggedByID = Dictionary(played.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let storedListening = options.listening.isEmpty && options.existingListening.isEmpty ? [] : try database.devicePlays(nil, includeVideo: true)
+        let storedByID = Dictionary(storedListening.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let replacements = Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
+            entry.replacesTrackID.map { (entry.path.lowercased(), $0) }
+        })
+        let databaseByID = Dictionary(uniqueKeysWithValues: database.tracks.map { ($0.id, $0) })
+        var listening = Dictionary(songs.compactMap { song -> (String, ClassicListeningState)? in
+            guard [.podcast, .audiobook, .tvShow, .movie].contains(song.classification),
+                  let requested = options.listening[song.originalSource ?? song.id],
+                  let path = matchedPaths[song.id] else { return nil }
+            let state = ClassicListeningState(milliseconds: min(requested.milliseconds, song.duration), played: requested.played)
+            if let id = replacements[path], let track = databaseByID[id] {
+                return (track.path.lowercased(), state)
+            }
+            if let track = paths[path], let live = loggedByID[track.persistentID], let stored = storedByID[track.persistentID],
+               live.bookmarkMilliseconds == state.milliseconds, stored.bookmarkMilliseconds == state.milliseconds,
+               live.played == (state.played || live.recent > 0 || (live.kind == .tvShow && live.total > 0)), stored.markedPlayed == state.played, stored.remembersPosition { return nil }
             return (path, state)
         }, uniquingKeysWith: { first, _ in first })
+        for track in database.tracks where !removedTracks.contains(track.id) {
+            guard let requested = options.existingListening[track.persistentID],
+                  let live = loggedByID[track.persistentID], live.kind != .music,
+                  let stored = storedByID[track.persistentID] else { continue }
+            let state = ClassicListeningState(milliseconds: min(max(0, live.durationMilliseconds), requested.milliseconds),
+                                             played: requested.played)
+            if live.bookmarkMilliseconds != state.milliseconds || stored.bookmarkMilliseconds != state.milliseconds ||
+                (live.recent == 0 && stored.markedPlayed != state.played) || !stored.remembersPosition {
+                listening[track.path.lowercased()] = state
+            }
+        }
         let reclaimableBytes = database.tracks.reduce(Int64(0)) { bytes, track in
             let path = track.path.lowercased()
             guard removedTracks.contains(track.id), !survivingPaths.contains(path),
@@ -664,13 +687,17 @@ public enum SyncEngine {
                 : "Outside this iPod’s music selection."
             return SyncItem(.remove, $0.fields[1] ?? "Untitled", reason)
         }
+        let newTitles = Dictionary(uniqueKeysWithValues: entries.map { ($0.path.lowercased(), $0.song.title) })
         items += listening.keys.sorted().compactMap { path in
-            guard let track = paths[path], let next = listening[path], let current = loggedByID[track.persistentID] else { return nil }
-            var item = SyncItem(.metadata, track.fields[1] ?? "Untitled", "Listening position and played status")
+            guard let next = listening[path] else { return nil }
+            let track = paths[path]
+            let current = track.flatMap { loggedByID[$0.persistentID] }
+            guard let title = track?.fields[1] ?? newTitles[path] else { return nil }
+            var item = SyncItem(.metadata, title, "Playback position and played status")
             item.metadataChanges = [
-                SyncMetadataChange(field: "Position", before: Self.bookmarkTime(current.bookmarkMilliseconds),
+                SyncMetadataChange(field: "Position", before: Self.bookmarkTime(current?.bookmarkMilliseconds ?? 0),
                                    after: Self.bookmarkTime(next.milliseconds)),
-                SyncMetadataChange(field: "Played", before: current.played ? "Yes" : "No", after: next.played ? "Yes" : "No")
+                SyncMetadataChange(field: "Played", before: current?.played == true ? "Yes" : "No", after: next.played ? "Yes" : "No")
             ].filter { $0.before != $0.after }
             return item
         }
@@ -685,8 +712,8 @@ public enum SyncEngine {
                         podcastUpdates: podcastUpdates, videoReleaseDates: videoReleaseDates,
                         videoTitles: videoTitles, videoDescriptions: videoDescriptions, removedVideoArtwork: removedVideoArtwork,
                         artistOverrides: artistOverrides, artworkSongs: artworkSongs, listening: listening,
-                        fillReserve: includesFillTransfers ? options.fillReserve : 0, playLogSnapshot: snapshot,
-                        podcastPlaySnapshots: !readsListening ? [:] : [
+                        fillReserve: includesFillTransfers ? options.fillReserve : 0,
+                        playbackSnapshots: !readsListening ? [:] : [
                             activePlayLog: playFiles.firstIndex(of: activePlayLog).map { playSnapshots[$0] },
                             activePlayPlist: playFiles.firstIndex(of: activePlayPlist).map { playSnapshots[$0] }
                         ])
@@ -718,7 +745,7 @@ public enum SyncEngine {
         return mediaType == ClassicMediaKind.tvShow.rawValue ? [kind, String(season), String(episode)] : [kind]
     }
 
-    private static func transferPath(_ url: URL, size: Int, date: Date, kind: ClassicMediaKind) -> String {
+    public static func transferPath(_ url: URL, size: Int, date: Date, kind: ClassicMediaKind) -> String {
         let suffix = kind == .music ? "" : "\0\(kind.rawValue)"
         let key = "\(url.path)\0\(size)\0\(date.timeIntervalSinceReferenceDate)\(suffix)"
         let hash = Array(SHA256.hash(data: Data(key.utf8)))
@@ -736,6 +763,18 @@ public enum SyncEngine {
     private static func bookmarkTime(_ milliseconds: Int) -> String {
         let seconds = milliseconds / 1000
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    public static func validatePlaybackSnapshot(_ plan: SyncPlan) throws {
+        let layout = try DeviceLayout(plan.device.mount)
+        let (database, _, _) = try load(plan.device, layout: layout)
+        guard Data(SHA256.hash(data: database)) == plan.signature else {
+            throw SyncError("The iPod library changed. Preview Sync again.")
+        }
+        for (url, snapshot) in plan.playbackSnapshots {
+            let current = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+            guard current == snapshot else { throw SyncError("iPod playback progress changed. Preview Sync again.") }
+        }
     }
 
     public static func apply(_ plan: SyncPlan, backups: URL, stop: SyncStop? = nil,
@@ -756,7 +795,7 @@ public enum SyncEngine {
         guard Data(SHA256.hash(data: original)) == plan.signature else {
             throw SyncError("The iPod library changed since the preview. Run Preview Sync again.")
         }
-        for (url, snapshot) in plan.podcastPlaySnapshots {
+        for (url, snapshot) in plan.playbackSnapshots {
             let live = fm.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
             guard live == snapshot else { throw SyncError("iPod listening history changed. Preview Sync again.") }
         }
@@ -880,21 +919,16 @@ public enum SyncEngine {
         guard live == original else {
             throw SyncError("The iPod library changed during transfer. Run Preview Sync again.")
         }
-        for (url, snapshot) in plan.podcastPlaySnapshots {
+        for (url, snapshot) in plan.playbackSnapshots {
             let live = fm.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
             guard live == snapshot else { throw SyncError("iPod listening history changed during sync. Try again.") }
         }
         let playCounts = layout.database.deletingLastPathComponent().appending(path: "Play Counts")
         let listening = stopped ? [:] : plan.listening
-        if !listening.isEmpty {
-            let exists = fm.fileExists(atPath: playCounts.path)
-            let liveCounts = exists ? try Data(contentsOf: playCounts) : nil
-            guard liveCounts == plan.playLogSnapshot else {
-                throw SyncError("iPod listening activity changed since the preview. Run Preview Sync again.")
-            }
-            if !exists, fm.fileExists(atPath: playCounts.deletingLastPathComponent().appending(path: "PlayCounts.plist").path) {
-                throw SyncError("This iPod uses a property-list play log. Turn off sending Mac progress to sync other changes.")
-            }
+        if !listening.isEmpty,
+           !fm.fileExists(atPath: playCounts.path),
+           fm.fileExists(atPath: playCounts.deletingLastPathComponent().appending(path: "PlayCounts.plist").path) {
+            throw SyncError("This iPod uses a property-list play log. Turn off sending Mac progress to sync other changes.")
         }
         var stagedCounts: (original: URL, filtered: URL)?
         defer {
@@ -977,7 +1011,7 @@ public enum SyncEngine {
                 .values.map { SyncItem(.skip, $0.title, "Sync stopped before artwork was saved.") }
         }
         let podcastResult = plan.repairsPodcastIndex ? [SyncItem(.metadata, "Podcasts", "Episode index rebuilt")] : []
-        let listeningResult = stopped ? [] : plan.items.filter { $0.detail == "Listening position and played status" }
+        let listeningResult = stopped ? [] : plan.items.filter { $0.detail == "Playback position and played status" }
         report(completed + deferred + metadata + playlistResults + removals + podcastResult + listeningResult + artworkSkips + cleanupIssues + plannedSkips)
         if writer?.skippedForSpace == true { notice(artworkWarning) }
         return copied.count

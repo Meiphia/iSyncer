@@ -586,10 +586,15 @@ final class PlayerEngine: ObservableObject {
         if let data = try? JSONEncoder().encode(state) { try? data.write(to: stateFile, options: .atomic) }
     }
 
-    private func saveCurrentListening() {
+    func saveCurrentListening() {
         guard pendingID == nil, let current, !current.isMusic, position >= 0,
               position > 0 || current.resumePosition != nil else { return }
         library.saveListening(current.id, position: position)
+    }
+
+    func refreshImportedListening(for id: String) {
+        guard current?.id == id, pendingID == nil else { return }
+        loadCurrent(autoplay: isPlaying)
     }
 
     /// Puts the last session's song back, paused at the same spot (like iTunes did).
@@ -604,7 +609,10 @@ final class PlayerEngine: ObservableObject {
         order = s.order.filter { s.queue.indices.contains($0) }
         position_ = order.firstIndex(of: s.order[s.index]) ?? 0
         playingPartyShuffle = s.partyShuffle
-        loadCurrent(from: s.position, autoplay: false)
+        let restoredTrack = library.track(s.queue[s.order[s.index]])
+        let hasImportedPosition = restoredTrack?.isMusic == false &&
+            (restoredTrack?.resumePosition != nil || restoredTrack?.finishedListening == true)
+        loadCurrent(from: hasImportedPosition ? nil : s.position, autoplay: false)
         // loadCurrent only resets play counting when starting at 0; a resumed song counts on.
         countedCurrent = s.position > 0 && s.position >= min(duration * playThreshold, 240)
     }

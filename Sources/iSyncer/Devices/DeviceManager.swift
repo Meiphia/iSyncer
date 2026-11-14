@@ -38,6 +38,7 @@ final class DeviceManager: ObservableObject {
             Task { await importPendingPlays() }
         }
     }
+    @Published private(set) var playbackConflict: PlaybackConflictRequest?
     @Published var message: String?
     @Published private(set) var settings: [String: ClassicSyncSettings] = {
         guard let data = UserDefaults.standard.data(forKey: "classicSyncSettings") else { return [:] }
@@ -57,6 +58,8 @@ final class DeviceManager: ObservableObject {
     }
 
     func discardPreview() {
+        playbackPreview = nil
+        playbackConflict = nil
         plan = nil
         skipped = []
         previewPlayed = []
@@ -77,6 +80,11 @@ final class DeviceManager: ObservableObject {
     private var refreshGeneration = 0
     private var libraryGeneration = 0
     private var plannedDevice: UUID?
+    private var playbackPreview: PlaybackProgressSync?
+    private var playbackBaselines: [String: [String: ClassicListeningState]] = {
+        guard let data = UserDefaults.standard.data(forKey: "iPodPlaybackBaselines") else { return [:] }
+        return (try? JSONDecoder().decode([String: [String: ClassicListeningState]].self, from: data)) ?? [:]
+    }()
     private var previewPlayed = Set<URL>()
     private var previewWatched = Set<URL>()
     private var stop: SyncStop?
@@ -174,12 +182,13 @@ final class DeviceManager: ObservableObject {
 
     func readListening(_ device: ClassicDevice, library: LibraryStore) async -> [ListeningChange]? {
         guard !busy, !library.isScanning, let root = library.libraryRoot else { return nil }
+        PlayerEngine.shared.saveCurrentListening()
         busy = true
         defer { busy = false }
         do {
-            let plays = try await Task.detached { try SyncEngine.readPlays(on: device.value) }.value
+            let plays = try await Task.detached { try SyncEngine.readPlays(on: device.value, includeVideo: true) }.value
             guard root == library.libraryRoot, self.device(device.id) != nil else { return nil }
-            return library.listeningChanges(plays)
+            return library.listeningChanges(plays.filter { $0.kind == .music })
         } catch {
             message = error.localizedDescription
             return nil
@@ -230,12 +239,41 @@ final class DeviceManager: ObservableObject {
         let current = Set(connected.map(\.id))
         pendingPlayImports.formIntersection(current)
         if automaticallyImportPlays { pendingPlayImports.formUnion(current.subtracting(previous)) }
-        if let plannedDevice, device(plannedDevice) == nil { plan = nil }
+        if let plannedDevice, device(plannedDevice) == nil { discardPreview() }
+        if let playbackConflict, device(playbackConflict.device) == nil { cancelPlaybackConflict() }
         await importPendingPlays()
     }
 
-    func prepare(_ device: ClassicDevice, library: LibraryStore, retry: Set<URL>? = nil) async {
+    func playbackConflict(for device: UUID) -> PlaybackConflictRequest? {
+        playbackConflict?.device == device ? playbackConflict : nil
+    }
+
+    func cancelPlaybackConflict() {
+        playbackConflict = nil
+        status = ""
+    }
+
+    func resolvePlaybackConflict(_ request: PlaybackConflictRequest, choices: [String: Bool], library: LibraryStore) async {
+        guard playbackConflict?.id == request.id, let device = device(request.device) else { return }
+        let resolved = Dictionary(uniqueKeysWithValues: request.changes.compactMap { match in
+            choices[match.id].map { preferIPod in
+                (match.id, PlaybackProgressSync.Selection(mac: match.macState, iPod: match.iPodState, preferIPod: preferIPod))
+            }
+        })
+        playbackConflict = nil
+        await prepare(device, library: library, retry: request.retry, playbackChoices: resolved)
+    }
+
+    func hasPlaybackImports(for id: UUID) -> Bool {
+        plannedDevice == id && playbackPreview?.imports.isEmpty == false
+    }
+
+    func prepare(_ device: ClassicDevice, library: LibraryStore, retry: Set<URL>? = nil,
+                 playbackChoices: [String: PlaybackProgressSync.Selection] = [:]) async {
         guard !busy, !library.isScanning, !library.isScanningVideos, let root = library.libraryRoot else { return }
+        PlayerEngine.shared.saveCurrentListening()
+        playbackPreview = nil
+        playbackConflict = nil
         busy = true
         plan = nil
         skipped = []
@@ -243,6 +281,27 @@ final class DeviceManager: ObservableObject {
         previewWatched = []
         status = "Checking media for iPod compatibility…"
         defer { busy = false; progress = nil }
+
+        let playback: PlaybackProgressSync
+        let matches: [ListeningChange]
+        do {
+            let plays = try await Task.detached { try SyncEngine.readPlays(on: device.value, includeVideo: true) }.value
+            guard root == library.libraryRoot, self.device(device.id) != nil else { return }
+            matches = library.listeningChanges(plays.filter { $0.kind != .music }, includeMatching: true)
+                .filter { match in retry == nil || library.url(forID: match.id).map { retry?.contains($0) == true } == true }
+            let resolved = PlaybackProgressSync(root: root, matches: matches,
+                                                baseline: playbackBaselines[device.value.settingsID] ?? [:], choices: playbackChoices)
+            if !resolved.conflicts.isEmpty {
+                playbackConflict = PlaybackConflictRequest(device: device.id, retry: retry, changes: resolved.conflicts)
+                status = "Choose which playback progress to keep"
+                return
+            }
+            playback = resolved
+        } catch {
+            status = "Could not read iPod playback progress"
+            message = error.localizedDescription
+            return
+        }
 
         let selection = settings(for: device)
         let playlists = library.playlists + library.smartListsAsPlaylists()
@@ -297,7 +356,7 @@ final class DeviceManager: ObservableObject {
         options.matchMusicByPath = Set((tracks + fillTracks).filter { ambiguousAlbums.contains($0.classicAlbumKey) }.map {
             root.appendingPathComponent($0.id)
         })
-        if selection.syncListeningProgress == true {
+        do {
             let urls = Set(podcasts.map { $0.0 }).union(audiobooks.map { $0.0 })
             options.listening = Dictionary(uniqueKeysWithValues: library.tracks.compactMap { track in
                 let url = root.appendingPathComponent(track.id)
@@ -305,6 +364,20 @@ final class DeviceManager: ObservableObject {
                 return (url, ClassicListeningState(seconds: track.resumePosition ?? 0, played: track.finishedListening ?? false))
             })
         }
+        if selection.tvShows || selection.movies {
+            for item in videoItems {
+                let url = root.appendingPathComponent(item.id)
+                let state = VideoWatchHistory.shared.state(at: url)
+                guard state.updated != .distantPast else { continue }
+                options.listening[url] = ClassicListeningState(seconds: state.seconds, played: state.watched)
+            }
+        }
+        // Existing matched items use the reconciled value. Source values are for new transfers.
+        for match in matches {
+            if let url = library.url(forID: match.id) { options.listening[url] = nil }
+        }
+        options.expectedListening = playback.expected
+        options.existingListening = playback.desired
         options.artwork = true
         options.retrySources = retry
         options.excludedVideos = selection.excludedVideos ?? [:]
@@ -474,17 +547,29 @@ final class DeviceManager: ObservableObject {
             previewWatched = watchedOnIPod
 
             plannedDevice = device.id
-            plan = preview.hasChanges || !preview.items.isEmpty || !skipped.isEmpty ? preview : nil
+            playbackPreview = playback
+            let hasImports = !playback.imports.isEmpty
+            plan = preview.hasChanges || hasImports || !preview.items.isEmpty || !skipped.isEmpty ? preview : nil
             self.skipped = skipped
-            if preview.hasChanges {
-                status = preview.canFit ? "Sync preview ready" : "Not enough free space to apply this preview"
+            if preview.hasChanges || hasImports {
+                status = !preview.hasChanges || preview.canFit ? "Sync preview ready" : "Not enough free space to apply this preview"
             } else {
                 status = plan == nil ? "iPod library is up to date" : "No changes to apply · See preview details"
                 if !skipped.isEmpty { saveReport(for: device, items: skipped + preview.items) }
+                savePlaybackBaseline(device, states: playback.expected)
             }
         } catch {
             message = error.localizedDescription
             status = "Could not preview sync"
+        }
+    }
+
+    private func savePlaybackBaseline(_ device: ClassicDevice, states: [Data: ClassicListeningState]) {
+        var entries = playbackBaselines[device.value.settingsID] ?? [:]
+        for (id, state) in states { entries[id.base64EncodedString()] = state }
+        playbackBaselines[device.value.settingsID] = entries
+        if let data = try? JSONEncoder().encode(playbackBaselines) {
+            UserDefaults.standard.set(data, forKey: "iPodPlaybackBaselines")
         }
     }
 
@@ -567,6 +652,7 @@ final class DeviceManager: ObservableObject {
     }
 
     private func previewRemoval(_ device: ClassicDevice, options: SyncOptions) async {
+        playbackPreview = nil
         previewPlayed = []
         previewWatched = []
         guard !busy else { return }
@@ -599,7 +685,18 @@ final class DeviceManager: ObservableObject {
     }
 
     func sync(_ device: ClassicDevice) async {
-        guard !busy, let plan = preview(for: device.id), plan.hasChanges, plan.canFit else { return }
+        guard !busy, let plan = preview(for: device.id),
+              (plan.hasChanges && plan.canFit) || (!plan.hasChanges && hasPlaybackImports(for: device.id)) else { return }
+        let playback = playbackPreview
+        let library = LibraryStore.shared
+        if let playback {
+            guard playback.root == library.libraryRoot,
+                  playback.matches.allSatisfy({ library.isCurrentListening($0) }) else {
+                discardPreview()
+                status = "Mac playback progress changed. Preview Sync again."
+                return
+            }
+        }
         busy = true
         status = "Preparing transfer…"
         progress = 0
@@ -616,12 +713,17 @@ final class DeviceManager: ObservableObject {
             progress = nil
             self.stop = nil
             self.plan = nil
+            playbackPreview = nil
         }
         do {
             let updates = AsyncStream.makeStream(of: (Int, Int, String).self, bufferingPolicy: .bufferingNewest(1))
             let work = Task.detached(priority: .userInitiated) { [weak self] in
                 defer { updates.continuation.finish() }
                 var report: [SyncItem] = []
+                if !plan.hasChanges {
+                    try SyncEngine.validatePlaybackSnapshot(plan)
+                    return (0, report)
+                }
                 let count = try SyncEngine.apply(plan, backups: backups, stop: stop, notice: { [weak self] notice in
                     Task { @MainActor in self?.message = notice }
                 }, report: { report = $0 }) { current, total, title in
@@ -641,20 +743,35 @@ final class DeviceManager: ObservableObject {
                         : "\(action) \((current + 1).formatted()) of \(total.formatted()) · \(title)"
                 }
             }
-            let (count, report) = try await work.value
+            let (count, deviceReport) = try await work.value
+            var report = deviceReport
             if !plan.videoExclusions.isEmpty, report.contains(where: { $0.action == .remove }) {
                 var updated = settings(for: device)
                 updated.excludedVideos = (updated.excludedVideos ?? [:]).merging(plan.videoExclusions) { _, new in new }
                 setSettings(updated, for: device)
             }
+            if let playback, !stop.isRequested, playback.root == library.libraryRoot,
+               !report.contains(where: { $0.action == .skip && ["iPod database", "iPod Play Counts"].contains($0.title) }) {
+                let imports = playback.imports.filter { library.isCurrentListening($0) }
+                library.applyListeningChanges(imports)
+                report += imports.map { SyncItem(.metadata, $0.title, "Imported playback progress from iPod") }
+                if let actual = try? await Task.detached(operation: { try SyncEngine.readPlays(on: device.value, includeVideo: true) }).value {
+                    let current = library.listeningChanges(actual.filter { $0.kind != .music }, includeMatching: true)
+                    let agreed = Dictionary(current.filter { $0.macState.matches($0.iPodState) }.map {
+                        ($0.play.id, $0.iPodState)
+                    }, uniquingKeysWith: { a, _ in a })
+                    if playback.root == library.libraryRoot { savePlaybackBaseline(device, states: agreed) }
+                }
+            }
+            let reconciled = Set(playback?.matches.compactMap { library.url(forID: $0.id) } ?? [])
             if !stop.isRequested, !played.isEmpty, !report.contains(where: { $0.title == "iPod database" && $0.action == .skip }) {
                 let library = LibraryStore.shared
-                for track in library.tracks where library.url(for: track).map(played.contains) == true {
+                for track in library.tracks where library.url(for: track).map { played.contains($0) && !reconciled.contains($0) } == true {
                     library.saveListening(track.id, position: 0, finished: true)
                 }
             }
             if !stop.isRequested, !report.contains(where: { $0.title == "iPod database" && $0.action == .skip }) {
-                for url in watched where !VideoWatchHistory.shared.state(at: url).watched {
+                for url in watched where !reconciled.contains(url) && !VideoWatchHistory.shared.state(at: url).watched {
                     VideoWatchHistory.shared.update(url, seconds: 0, duration: 0, watched: true)
                 }
             }

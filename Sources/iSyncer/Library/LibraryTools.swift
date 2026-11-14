@@ -165,18 +165,52 @@ struct ImportInbox: View {
 }
 
 struct ListeningChange: Identifiable {
-    let track: Track
+    enum Local {
+        case audio(Track)
+        case video(VideoItem, URL, VideoWatchHistory.State)
+    }
+
+    let local: Local
     let play: DevicePlayCount
     let position: Double
-    var id: String { track.id }
+
+    var id: String {
+        switch local {
+        case .audio(let track): track.id
+        case .video(let video, _, _): video.id
+        }
+    }
+
+    var title: String {
+        switch local {
+        case .audio(let track): track.title
+        case .video(let video, _, _): video.kind == .tv ? "\(video.show) · \(play.title)" : play.title
+        }
+    }
+
+    var macState: ClassicListeningState {
+        switch local {
+        case .audio(let track):
+            return .init(seconds: track.resumePosition ?? 0, played: track.finishedListening == true)
+        case .video(_, _, let state):
+            return .init(seconds: state.seconds, played: state.watched)
+        }
+    }
+
+    var iPodState: ClassicListeningState { play.listeningState }
+
+    var macPositionLabel: String { Self.label(macState) }
+    var iPodPositionLabel: String { Self.label(iPodState) }
+
+    private static func label(_ state: ClassicListeningState) -> String {
+        state.played && state.milliseconds == 0 ? "Finished" : Format.duration(Double(state.milliseconds) / 1000)
+    }
 
     var comparison: String {
-        if play.kind == .music {
+        if case .audio(let track) = local, play.kind == .music {
             return "Mac: \(track.rating) stars · iPod: \(play.rating) stars"
         }
-        let mac = track.finishedListening == true ? "played" : Format.duration(track.resumePosition ?? 0)
-        let device = play.played ? "played" : Format.duration(position)
-        return "Mac: \(mac) · iPod: \(device)"
+        return "Mac: \(macPositionLabel) · iPod: \(iPodPositionLabel)"
     }
 }
 
@@ -189,7 +223,7 @@ struct ListeningImportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("iPod Ratings & Listening").font(.headline)
+            Text("iPod Ratings").font(.headline)
             if changes.isEmpty {
                 ContentUnavailableView("No differences", systemImage: "ipod")
             } else {
@@ -198,7 +232,7 @@ struct ListeningImportSheet: View {
                         if $0 { selected.insert(item.id) } else { selected.remove(item.id) }
                     })) {
                         VStack(alignment: .leading) {
-                            Text(item.track.title)
+                            Text(item.title)
                             Text(item.comparison).foregroundStyle(.secondary)
                         }
                     }
@@ -214,5 +248,40 @@ struct ListeningImportSheet: View {
         }
         .padding(16)
         .frame(width: 560, height: 420)
+    }
+}
+
+@MainActor
+struct PlaybackConflictSheet: View {
+    let conflicts: [ListeningChange]
+    let cancel: () -> Void
+    let confirm: ([String: Bool]) -> Void
+    @State private var choices: [String: Bool] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose Playback Progress").font(.headline)
+            Text("Both devices have different progress for these items. Choose the position to keep on both.")
+                .foregroundStyle(.secondary)
+            List(conflicts) { item in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(item.title).fontWeight(.medium)
+                    Picker("Position for \(item.title)", selection: Binding<Bool?>(
+                        get: { choices[item.id] }, set: { choices[item.id] = $0 }
+                    )) {
+                        Text("Choose…").tag(nil as Bool?)
+                        Text("Mac · \(item.macPositionLabel)").tag(Optional(false))
+                        Text("iPod · \(item.iPodPositionLabel)").tag(Optional(true))
+                    }.labelsHidden()
+                }.padding(.vertical, 3)
+            }
+            HStack {
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Continue", action: { confirm(choices) })
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(conflicts.contains { choices[$0.id] == nil })
+            }
+        }.padding(16).frame(width: 540, height: 410)
     }
 }

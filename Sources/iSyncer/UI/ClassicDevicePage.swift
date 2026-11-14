@@ -84,6 +84,14 @@ struct ClassicDevicePage: View {
             .sheet(isPresented: $showingBackups) {
                 backupSheet(device)
             }
+            .sheet(item: Binding(
+                get: { devices.playbackConflict(for: device.id) },
+                set: { if $0 == nil, devices.playbackConflict(for: device.id) != nil { devices.cancelPlaybackConflict() } }
+            )) { request in
+                PlaybackConflictSheet(conflicts: request.changes, cancel: devices.cancelPlaybackConflict) { choices in
+                    Task { await devices.resolvePlaybackConflict(request, choices: choices, library: library) }
+                }
+            }
             .sheet(isPresented: $showingListening) {
                 ListeningImportSheet(changes: listeningChanges) { library.applyListeningChanges($0) }
             }
@@ -155,12 +163,7 @@ struct ClassicDevicePage: View {
                     Toggle("Sync only checked songs and videos", isOn: setting(\.checkedOnly, device))
                     Toggle("Use Album Artist as Artist on the iPod", isOn: $devices.useAlbumArtistForArtist)
                     Toggle("Import play counts when an iPod connects", isOn: $devices.automaticallyImportPlays)
-                    Toggle("Send Mac listening progress when syncing", isOn: Binding(
-                        get: { devices.settings(for: device).syncListeningProgress ?? false },
-                        set: { setting(\.syncListeningProgress, device).wrappedValue = $0 }
-                    ))
-                    .help("Review listening differences first if you have listened to the same episode or book on both devices.")
-                    Button("Review iPod Ratings & Listening…") {
+                    Button("Review iPod Ratings…") {
                         Task {
                             if let changes = await devices.readListening(device, library: library) {
                                 listeningChanges = changes
@@ -589,7 +592,8 @@ struct ClassicDevicePage: View {
                 if plan.retagCount > 0 { Text("\(plan.retagCount.formatted()) tracks to retag") }
                 if !devices.skipped.isEmpty { Text("\(devices.skipped.count.formatted()) items skipped") }
                 if plan.hasChanges && !plan.canFit { Label("The iPod is low on free space.", systemImage: "exclamationmark.triangle") }
-                if !plan.hasChanges { Text("No changes to apply") }
+                if devices.hasPlaybackImports(for: id) { Text("Playback progress will also be imported to this Mac.") }
+                else if !plan.hasChanges { Text("No changes to apply") }
             }
         }
     }
@@ -609,11 +613,11 @@ struct ClassicDevicePage: View {
                 }
                 if devices.canStop {
                     Button("Stop Sync & Save") { devices.stopAndSave() }.buttonStyle(ChromeButtonStyle())
-                } else if let plan, plan.hasChanges, !devices.busy {
+                } else if let plan, plan.hasChanges || devices.hasPlaybackImports(for: id), !devices.busy {
                     Button("Clear Preview") { devices.discardPreview() }.buttonStyle(ChromeButtonStyle())
                     Button("Apply") { confirming = true }
                         .buttonStyle(PillButtonStyle(prominent: true))
-                        .disabled(!plan.canFit)
+                        .disabled(plan.hasChanges && !plan.canFit)
                 } else {
                     Button("Preview Sync") { Task { await devices.prepare(device, library: library) } }
                         .buttonStyle(PillButtonStyle(prominent: true))

@@ -55,7 +55,7 @@ struct LibraryVideoPlayer: View {
                 }
             }
             let resume = VideoWatchHistory.shared.state(at: url)
-            checkpoint = resume.watched ? 0 : resume.seconds
+            checkpoint = resume.seconds
             observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 600), queue: .main) { time in
                 Task { @MainActor in
                     guard !ended, player.currentItem === item else { return }

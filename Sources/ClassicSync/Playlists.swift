@@ -89,6 +89,8 @@ public struct SyncOptions: Sendable {
     public var reconcileMusic = false
     public var podcastLimits: [String: PodcastSyncLimit] = [:]
     public var listening: [URL: ClassicListeningState] = [:]
+    public var existingListening: [Data: ClassicListeningState] = [:]
+    public var expectedListening: [Data: ClassicListeningState]?
     public var matchMusicByPath: Set<URL> = []
     public var fillAlbums: [[Song]] = []
     public var fillReserve: Int64 = 0

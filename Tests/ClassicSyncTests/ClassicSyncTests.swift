@@ -486,4 +486,67 @@ private final class ProgressLog: @unchecked Sendable {
     try tvCounts.write(to: playLog)
     #expect(try SyncEngine.apply(tvPreview, backups: backups) { _, _, _ in } == 0)
     #expect(Set(try Device.inspect(mount).contents.map(\.title)) == [pinnedTV.title, movie.title])
+
+    // Exercise bookmark-only updates on existing media with a positional play log.
+    let book = try source("Audiobook", kind: .audiobook)
+    let media = [episode, book, pinnedTV]
+    let addSpoken = try SyncEngine.preview(media, on: Device.inspect(mount))
+    #expect(try SyncEngine.apply(addSpoken, backups: backups) { _, _, _ in } == 2)
+    let withSpoken = try Device.inspect(mount)
+    let beforeProgress = try Database(Data(contentsOf: database))
+    var bookmarks = Data(count: 96 + 28 * beforeProgress.tracks.count)
+    bookmarks.replaceSubrange(0..<4, with: "mhdp".utf8)
+    bookmarks.put(96, at: 4)
+    bookmarks.put(28, at: 8)
+    bookmarks.put(beforeProgress.tracks.count, at: 12)
+    for (index, track) in beforeProgress.tracks.enumerated() where media.contains(where: { $0.title == track.fields[1] }) {
+        bookmarks.put(256, at: 96 + index * 28 + 16)
+        bookmarks.put(700, at: 96 + index * 28 + 8)
+    }
+    try bookmarks.write(to: playLog)
+    let originalPlays = try SyncEngine.readPlays(on: withSpoken, includeVideo: true)
+    #expect(originalPlays.filter { $0.bookmarkMilliseconds == 700 }.count == 3)
+
+    var progress = SyncOptions()
+    // Even a matching Play Counts bookmark needs committing to the database.
+    progress.listening = [episode.url: .init(seconds: 0.7, played: false),
+                          book.url: .init(seconds: 0.4, played: false),
+                          pinnedTV.url: .init(seconds: 0.5, played: false)]
+    let update = try SyncEngine.preview(media, on: withSpoken, options: progress)
+    #expect(update.pending.isEmpty)
+    #expect(update.items.filter { $0.detail == "Playback position and played status" }.count == 3)
+    #expect(try SyncEngine.apply(update, backups: backups) { _, _, _ in } == 0)
+    let updatedPlays = try SyncEngine.readPlays(on: withSpoken, includeVideo: true)
+    #expect(updatedPlays.first { $0.kind == .podcast }?.bookmarkMilliseconds == 700)
+    #expect(updatedPlays.first { $0.kind == .audiobook }?.bookmarkMilliseconds == 400)
+    #expect(updatedPlays.first { $0.kind == .tvShow }?.bookmarkMilliseconds == 500)
+    let onDisk = try Database(Data(contentsOf: database))
+    #expect(try onDisk.devicePlays(nil, includeVideo: true) == updatedPlays)
+    #expect(try !SyncEngine.preview(media, on: withSpoken, options: progress).hasChanges)
+
+    // An item already on the iPod can sync its position independently of media selection.
+    let matchedBook = try #require(updatedPlays.first { $0.kind == .audiobook })
+    var alreadyOnDevice = SyncOptions()
+    alreadyOnDevice.existingListening = [matchedBook.id: .init(seconds: 0.9, played: false)]
+    alreadyOnDevice.expectedListening = [matchedBook.id: matchedBook.listeningState]
+    let bookmarkOnly = try SyncEngine.preview([], on: withSpoken, options: alreadyOnDevice)
+    #expect(bookmarkOnly.hasChanges && bookmarkOnly.pending.isEmpty)
+    try SyncEngine.validatePlaybackSnapshot(bookmarkOnly)
+    #expect(try SyncEngine.apply(bookmarkOnly, backups: backups) { _, _, _ in } == 0)
+    #expect(try SyncEngine.readPlays(on: withSpoken).first { $0.kind == .audiobook }?.bookmarkMilliseconds == 900)
+    #expect(throws: SyncError.self) { try SyncEngine.validatePlaybackSnapshot(bookmarkOnly) }
+
+}
+
+@Test func playbackProgressReconciliation() {
+    func position(_ seconds: Double) -> ClassicListeningState { .init(seconds: seconds, played: false) }
+    let empty = position(0), old = position(60), mac = position(180), iPod = position(240)
+    #expect(ClassicListeningState.reconcile(mac: mac, iPod: empty, last: nil) == .useMac)
+    #expect(ClassicListeningState.reconcile(mac: empty, iPod: iPod, last: nil) == .useIPod)
+    #expect(ClassicListeningState.reconcile(mac: mac, iPod: iPod, last: nil) == .conflict)
+    #expect(ClassicListeningState.reconcile(mac: mac, iPod: old, last: old) == .useMac)
+    #expect(ClassicListeningState.reconcile(mac: old, iPod: iPod, last: old) == .useIPod)
+    #expect(ClassicListeningState.reconcile(mac: mac, iPod: iPod, last: old) == .conflict)
+    #expect(ClassicListeningState.reconcile(mac: old, iPod: position(60.2), last: nil) == .same)
+    #expect(ClassicListeningState.reconcile(mac: empty, iPod: old, last: old) == .useMac)
 }

@@ -18,7 +18,6 @@ struct ClassicSyncSettings: Codable, Equatable {
     var tvOverrides: [String: [Int: TVSeasonSelection]]? = nil
     var podcastNames: Set<String> = []
     var podcastRetention: [String: PodcastRetention]? = nil
-    var syncListeningProgress: Bool? = nil
     var syncAudiobooks: Bool? = nil
     var selectedAudiobooks: Set<String>? = nil
     var fillRemainingSpace: Bool? = nil
