@@ -34,15 +34,17 @@ struct EpisodeMove {
         try Self.perform([self], in: root, saveMetadata: saveMetadata)
     }
 
-    static func checkedFiles(_ moves: [Self], in root: URL) throws -> [(from: URL, to: URL)] {
+    static func checkedFiles(_ moves: [Self], in root: URL, additionalRoots: [URL] = []) throws -> [(from: URL, to: URL)] {
         let fm = FileManager.default
-        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let roots = ([root] + additionalRoots).map { $0.resolvingSymlinksInPath().standardizedFileURL.path }
         let files = try moves.flatMap { move in
             let source = try move.source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             let folder = move.destination.deletingLastPathComponent()
             let paths = [move.source, folder.deletingLastPathComponent(), folder]
             guard source.isRegularFile == true, source.isSymbolicLink != true,
-                  paths.allSatisfy({ $0.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(rootPath + "/") }) else {
+                  roots.contains(where: { base in
+                      paths.allSatisfy { $0.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(base + "/") }
+                  }) else {
                 throw SyncError("The episode and its destination must be inside the media library.")
             }
             return try move.files()
@@ -61,9 +63,9 @@ struct EpisodeMove {
         return files
     }
 
-    static func perform(_ moves: [Self], in root: URL, saveMetadata: () throws -> Void) throws {
+    static func perform(_ moves: [Self], in root: URL, additionalRoots: [URL] = [], saveMetadata: () throws -> Void) throws {
         let fm = FileManager.default
-        let files = try checkedFiles(moves, in: root)
+        let files = try checkedFiles(moves, in: root, additionalRoots: additionalRoots)
         var staged: [(from: URL, temp: URL, to: URL)] = []
         var placed = 0
         do {
@@ -108,7 +110,7 @@ struct EpisodeNumberEdit {
     let season: Int
     let episode: Int
 
-    static func plan(_ edits: [Self], videos: [VideoItem], root: URL) throws -> [PlannedEpisodeMove] {
+    static func plan(_ edits: [Self], videos: [VideoItem], root: URL, additionalRoots: [URL] = []) throws -> [PlannedEpisodeMove] {
         let byID = Dictionary(uniqueKeysWithValues: videos.map { ($0.id, $0) })
         var moves: [PlannedEpisodeMove] = []
         for edit in edits {
@@ -125,7 +127,7 @@ struct EpisodeNumberEdit {
             guard updated.kind == .tv, updated.show == video.show, updated.season == edit.season, updated.episode == edit.episode else {
                 throw SyncError("This episode’s folder layout could not be renumbered safely.")
             }
-            let files = EpisodeMove(source: root.appendingPathComponent(video.id), destination: root.appendingPathComponent(path))
+            let files = EpisodeMove(source: root.appendingLibraryPath(video.id), destination: root.appendingLibraryPath(path))
             moves.append(PlannedEpisodeMove(previous: video, updated: updated, files: files))
         }
         let sourceIDs = Set(moves.map { $0.previous.id })
@@ -135,7 +137,7 @@ struct EpisodeNumberEdit {
                 throw SyncError("\(move.updated.show) already has S\(move.updated.season)E\(move.updated.episode) in this plan.")
             }
         }
-        _ = try EpisodeMove.checkedFiles(moves.map(\.files), in: root)
+        _ = try EpisodeMove.checkedFiles(moves.map(\.files), in: root, additionalRoots: additionalRoots)
         return moves
     }
 }

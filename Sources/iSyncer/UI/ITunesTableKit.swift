@@ -65,7 +65,7 @@ final class ITTableView: NSTableView {
         textSize = size
         rowHeight = ITStyle.rowHeight + size.extra
         if let headerView {
-            headerView.frame.size.height = 17 + size.extra
+            headerView.frame.size.height = Theme.paneHeaderHeight + size.extra
             headerView.needsDisplay = true
         }
         for column in tableColumns { column.headerCell.font = ITStyle.font(size) }
@@ -212,7 +212,7 @@ func configureITTable(_ table: NSTableView, header: Bool = true) {
     table.style = .plain
     table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
     if header {
-        let hv = ITHeaderView(frame: NSRect(x: 0, y: 0, width: 400, height: 17))
+        let hv = ITHeaderView(frame: NSRect(x: 0, y: 0, width: 400, height: Theme.paneHeaderHeight))
         table.headerView = hv
     } else {
         table.headerView = nil
@@ -265,6 +265,7 @@ struct ITColumnList: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let table = ITTableView()
         configureITTable(table)
+        table.intercellSpacing = .zero
         table.gridStyleMask = []
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
         col.headerCell = makeHeaderCell(title)

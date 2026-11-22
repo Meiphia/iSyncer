@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// The iTunes 6 "Source" list: one flat list (Library, Videos, Party Shuffle, devices,
+/// The iTunes 6 "Source" list: one flat list (Music, Videos, Party Shuffle, devices,
 /// smart playlists, playlists) under a glossy header, with the artwork pane at the bottom.
 @MainActor
 struct Sidebar: View {
@@ -22,7 +22,8 @@ struct Sidebar: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     row(.library, icon: SourceIcon(symbol: "music.note", color: Theme.hex(0x2F6BC9)),
-                        title: "Library", onDoubleClick: playLibrary)
+                        title: "Music", onDoubleClick: playLibrary)
+                    row(.artists, icon: SourceIcon(symbol: "person.2", color: Theme.hex(0x2F6BC9)), title: "Artists")
                     row(.videos, icon: SourceIcon(symbol: "film", color: Theme.hex(0x4A4A4A)), title: "Videos")
                     row(.podcasts, icon: SourceIcon(symbol: "mic", color: Theme.hex(0x7554A3)), title: "Podcasts")
                     row(.audiobooks, icon: SourceIcon(symbol: "book", color: Theme.hex(0xA26D3E)), title: "Audiobooks")
@@ -90,9 +91,6 @@ struct Sidebar: View {
             }
         }
         .background(Theme.sourceBackground)
-        .overlay(alignment: .trailing) {
-            Rectangle().fill(Theme.hex(0x8E8E8E)).frame(width: 1)
-        }
         .alert("Rename Playlist", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Name", text: $renameText)
             Button("Rename") {
@@ -101,7 +99,7 @@ struct Sidebar: View {
             }
             Button("Cancel", role: .cancel) { renaming = nil }
         }
-        .task(id: [artworkTrack?.id ?? "", artworkTrack?.podcastShow == nil ? "" : String(artworkLoader.podcastRevision)]) {
+        .task(id: [artworkTrack?.id ?? "", String(artworkLoader.podcastRevision)]) {
             if let t = artworkTrack { artwork = await ArtworkLoader.shared.image(for: t) } else { artwork = nil }
         }
     }
@@ -171,6 +169,9 @@ struct Sidebar: View {
                     }
                 }
                 .clipped()
+                .contentShape(Rectangle())
+                .onTapGesture { browser.showExpandedPlayer.toggle() }
+                .help("Expand Now Playing")
         }
         .overlay(alignment: .top) { Rectangle().fill(Theme.hex(0x8E8E8E)).frame(height: 1) }
     }
@@ -232,11 +233,24 @@ struct GlossyHeader: View {
 
     var body: some View {
         Text(title)
-            .font(textSize.font(12))
+            .font(textSize.font(11))
+            .paneHeader()
+    }
+}
+
+private struct PaneHeader: ViewModifier {
+    @Environment(\.interfaceTextSize) private var textSize
+
+    func body(content: Content) -> some View {
+        content
             .foregroundStyle(Theme.hex(0x222222))
             .frame(maxWidth: .infinity)
-            .frame(height: 18 + textSize.extra)
+            .frame(height: Theme.paneHeaderHeight + textSize.extra)
             .background(Theme.glossyHeader)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.hex(0x8E8E8E)).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.paneHeaderLine).frame(height: 1) }
     }
+}
+
+extension View {
+    func paneHeader() -> some View { modifier(PaneHeader()) }
 }

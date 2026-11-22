@@ -521,6 +521,13 @@ final class SongTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             if let r = self?.table?.selectedRowIndexes.first { self?.play(fromRow: r) }
         })
         menu.addItem(ClosureMenuItem("Get Info") { GetInfoController.shared.show(ids: ids) })
+        if let track = lib.track(ids[0]), track.isMusic {
+            menu.addItem(ClosureMenuItem("Artist Page") {
+                browser.source = .artists
+                browser.artist = track.displayAlbumArtist
+            })
+            menu.addItem(ClosureMenuItem("Artwork Gallery…") { CollectionWindows.gallery(track) })
+        }
         if browser.source != .podcasts, let t = lib.track(ids[0]) {
             let infoItem = NSMenuItem(title: "Get Info for All Songs…", action: nil, keyEquivalent: "")
             let infoMenu = NSMenu()

@@ -20,6 +20,15 @@ struct PodcastFeed: Sendable {
     let image: URL?
     let author: String?
 
+    var newestFirst: [PodcastEpisode] {
+        var seen = Set<URL>()
+        return episodes.enumerated().sorted {
+            let first = $0.element.publishedAt ?? .distantPast
+            let second = $1.element.publishedAt ?? .distantPast
+            return first == second ? $0.offset < $1.offset : first > second
+        }.map(\.element).filter { seen.insert($0.id).inserted }
+    }
+
     static func load(_ input: String) async throws -> PodcastFeed {
         guard let url = URL(string: input.trimmingCharacters(in: .whitespacesAndNewlines)), isWebURL(url) else {
             throw SyncError("Enter an HTTP or HTTPS RSS feed URL.")
@@ -90,7 +99,7 @@ struct PodcastFeed: Sendable {
             for (feed, items) in Dictionary(grouping: pending, by: { $0.1.feed }) {
                 tasks.addTask {
                     guard let rss = try? await load(feed) else { return [] }
-                    let dates = Dictionary(uniqueKeysWithValues: rss.episodes.compactMap { episode in
+                    let dates = Dictionary(uniqueKeysWithValues: rss.newestFirst.compactMap { episode in
                         episode.publishedAt.map { (episode.enclosure, $0) }
                     })
                     return items.compactMap { url, metadata in

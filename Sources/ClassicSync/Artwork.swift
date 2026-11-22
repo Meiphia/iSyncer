@@ -171,7 +171,15 @@ final class ArtworkWriter {
     }
 
     static func sourceArtwork(for song: Song) -> Data? {
+        if let selected = song.musicArtwork { return selected }
+        if song.reviewsMusicArtwork {
+            let source = song.audioSource?.url ?? song.url
+            return EmbeddedArtwork.data(at: source) ?? MediaArtwork.externalData(at: source)
+        }
         let spoken = song.classification == .podcast || song.classification == .audiobook
+        if let source = song.audioSource?.url {
+            return MediaArtwork.externalData(at: song.url) ?? MediaArtwork.externalData(at: source) ?? EmbeddedArtwork.data(at: source)
+        }
         return song.videoMetadata?.artworkData
             ?? (spoken ? MediaArtwork.externalData(at: song.url) : nil)
             ?? EmbeddedArtwork.data(at: song.url)
@@ -367,7 +375,7 @@ public enum EmbeddedArtwork {
         ] as CFDictionary)
     }
 
-    fileprivate static func data(at url: URL) -> Data? {
+    static func data(at url: URL) -> Data? {
         var file: AudioFileID?
         guard AudioFileOpenURL(url as CFURL, .readPermission, 0, &file) == noErr, let file else { return nil }
         defer { AudioFileClose(file) }

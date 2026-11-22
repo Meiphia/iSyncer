@@ -11,6 +11,7 @@ struct MainView: View {
     @ObservedObject private var podcasts = PodcastSubscriptions.shared
     @ObservedObject private var lyrics = LyricsPresentation.shared
     @State private var showPodcastDiscovery = false
+    @State private var podcastFeedToBrowse: URL?
     @AppStorage("columnBrowserHeight") private var browserHeight: Double = 310
 
     var body: some View {
@@ -45,7 +46,17 @@ struct MainView: View {
         }
         .frame(minWidth: lyrics.isVisible ? 1002 : 900, minHeight: 520)
         .preferredColorScheme(.light)
-        .sheet(isPresented: $showPodcastDiscovery) { PodcastDownloadSheet(library: library) }
+        .onChange(of: browser.source) { _, _ in browser.showExpandedPlayer = false }
+        .onReceive(devices.didConnect) { id in
+            browser.showCoverFlow = false
+            browser.showVisualizer = false
+            browser.source = .device(id)
+            let windows = MiniPlayerController.shared
+            windows.mainWindow?.deminiaturize(nil)
+            NSApp.activate()
+            windows.showMain()
+        }
+        .sheet(isPresented: $showPodcastDiscovery) { PodcastDownloadSheet(library: library, initialFeed: podcastFeedToBrowse) }
         .alert("iSyncer", isPresented: Binding(get: { devices.message != nil }, set: { if !$0 { devices.message = nil } })) {
             Button("OK") { devices.message = nil }
         } message: {
@@ -59,12 +70,16 @@ struct MainView: View {
     private var detail: some View {
         if library.libraryRoot == nil {
             WelcomeView(library: library)
+        } else if browser.showExpandedPlayer {
+            ExpandedNowPlaying(player: player, library: library, visible: $browser.showExpandedPlayer)
         } else if browser.showCoverFlow {
             CoverFlowView(library: library, player: player, visible: $browser.showCoverFlow)
         } else {
             switch browser.source {
             case .videos:
                 VideoPage(library: library, search: browser.search)
+            case .artists:
+                ArtistPages(library: library, player: player, browser: browser)
             case .device(let id):
                 ClassicDevicePage(id: id, devices: devices, library: library)
             case .library, .podcasts, .audiobooks, .playlist, .smart, .partyShuffle, .health, .smartList:
@@ -79,43 +94,18 @@ struct MainView: View {
                     // Plain VStack + custom handles instead of VSplitView: NSSplitView-backed views can
                     // spin in layout when a pane appears/disappears (e.g. switching to a playlist).
                     VStack(spacing: 0) {
-                        if browser.source == .podcasts {
-                            HStack {
-                                Text("Podcasts").font(textSize.bold(12))
-                                Spacer()
-                                Toggle("Unplayed", isOn: $browser.showUnplayedPodcasts).controlSize(.small)
-                                if !podcasts.shows.isEmpty {
-                                    Menu("Followed Shows") {
-                                        Button("Check for New Episodes") { Task { await podcasts.refresh(library) } }
-                                            .disabled(podcasts.checking || devices.busy)
-                                        ForEach(podcasts.shows) { show in
-                                            Menu(show.title) {
-                                                Button("Show Episodes") {
-                                                    browser.albumSel = []
-                                                    browser.search = show.show
-                                                }
-                                                Button("Unfollow") { podcasts.unfollow(show.id) }
-                                            }
-                                        }
-                                    }
-                                }
-                                Button("Find & Download Podcasts…") { showPodcastDiscovery = true }
-                                    .buttonStyle(ChromeButtonStyle())
-                            }
-                            .padding(.horizontal, 9)
-                            .frame(height: 28 + textSize.extra)
-                            .background(Theme.chrome)
-                        }
                         if browser.showColumnBrowser && !browser.isListSource {
                             Group {
                                 if browser.source == .podcasts {
-                                    AlbumArtworkPane(browser: browser, onPlay: playVisible)
+                                    AlbumArtworkPane(browser: browser, onPlay: playVisible, controls: AnyView(podcastControls))
                                 } else {
                                     ColumnBrowser(browser: browser, onPlay: playVisible)
                                 }
                             }
                             .frame(height: browserHeight)
                             SplitHandle(value: $browserHeight, range: 80...600)
+                        } else if browser.source == .podcasts {
+                            podcastControls
                         }
                         if browser.source == .health {
                             healthTabs
@@ -129,6 +119,55 @@ struct MainView: View {
                 }
             }
         }
+    }
+
+    private var podcastControls: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            Toggle("Unplayed", isOn: $browser.showUnplayedPodcasts)
+            if let feed = selectedPodcastFeed {
+                Button("Browse Feed…") { browsePodcast(feed) }
+            }
+            if !podcasts.shows.isEmpty {
+                Menu("Followed Shows") {
+                    Button("Check for New Episodes") { Task { await podcasts.refresh(library) } }
+                        .disabled(podcasts.checking || devices.busy)
+                    ForEach(podcasts.shows) { show in
+                        Menu(show.title) {
+                            Button("Show Episodes") {
+                                browser.albumSel = []
+                                browser.search = show.show
+                            }
+                            Button("Browse Feed…") { browsePodcast(show.id) }
+                            Button("Unfollow") { podcasts.unfollow(show.id) }
+                        }
+                    }
+                }
+                .fixedSize()
+            }
+            Button("Find & Download Podcasts…") { browsePodcast(nil) }
+                .fixedSize()
+        }
+        .font(textSize.font(11))
+        .controlSize(.mini)
+        .padding(.horizontal, 9)
+        .frame(height: Theme.paneHeaderHeight + textSize.extra)
+        .background(Theme.chrome)
+    }
+
+    private func browsePodcast(_ feed: URL?) {
+        podcastFeedToBrowse = feed
+        showPodcastDiscovery = true
+    }
+
+    private var selectedPodcastFeed: URL? {
+        guard let show = browser.album else { return nil }
+        if let followed = podcasts.shows.first(where: { $0.show == show }) { return followed.id }
+        guard let episode = browser.albumSummaries.first(where: { $0.name == show })?.first,
+              let url = library.url(for: episode),
+              let address = try? String(contentsOf: url.deletingLastPathComponent().appending(path: ".feed-url"), encoding: .utf8),
+              let feed = URL(string: address), PodcastFeed.isWebURL(feed) else { return nil }
+        return feed
     }
 
     private var healthTabs: some View {
@@ -219,11 +258,17 @@ func chooseLibraryFolder(_ library: LibraryStore) {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
-    panel.allowsMultipleSelection = false
-    panel.prompt = "Use as Media Library"
-    panel.message = "Choose the folder that holds your music and videos. If you pick the folder above your current library, everything carries over."
-    if panel.runModal() == .OK, let url = panel.url {
-        library.setRoot(url)
+    panel.allowsMultipleSelection = true
+    panel.prompt = "Add Folders"
+    panel.message = "Add media folders to your library. Manage or remove them in Settings → Library."
+    if panel.runModal() == .OK {
+        do { try library.addFolders(panel.urls) }
+        catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t Add Library Folders"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
     }
 }
 
@@ -288,6 +333,10 @@ struct StatusBar: View {
                 .lineLimit(1)
             Spacer()
 
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(ChromeButtonStyle(compact: true))
+                .help("Settings")
+                .accessibilityLabel("Settings")
             Button { EqualizerWindowController.shared.toggle() } label: { Image(systemName: "slider.vertical.3") }
                 .buttonStyle(ChromeButtonStyle(compact: true))
                 .help("Equalizer")

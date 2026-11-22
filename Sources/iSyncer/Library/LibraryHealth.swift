@@ -91,7 +91,7 @@ final class LibraryHealth: ObservableObject {
                 let slice = Array(groups[i..<min(i + chunk, groups.count)])
                 let found: [[String]] = await Task.detached(priority: .utility) {
                     slice.filter { ids in
-                        let url = root.appendingPathComponent(ids[0])
+                        let url = root.appendingLibraryPath(ids[0])
                         if ArtworkLoader.folderImage(in: url.deletingLastPathComponent()) != nil { return false }
                         return TagReader.read(url: url, wantArtwork: true)?.artwork == nil
                     }

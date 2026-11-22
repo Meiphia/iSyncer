@@ -26,6 +26,13 @@ final class VideoWatchHistory: ObservableObject {
         return entries[url.standardizedFileURL.path] ?? State()
     }
 
+    func reload() {
+        entries = UserDefaults.standard.data(forKey: "videoWatchHistory").flatMap {
+            try? JSONDecoder().decode([String: State].self, from: $0)
+        } ?? [:]
+        watchedRevision += 1
+    }
+
     func relink(from old: URL, to new: URL, paths: Set<String>) {
         guard old != new else { return }
         var changed = false

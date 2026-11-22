@@ -171,6 +171,9 @@ struct ClassicDevicePage: View {
             Text("Options").font(textSize.bold(14))
             panel {
                 VStack(alignment: .leading, spacing: 7) {
+                    Stepper("Parallel encoding jobs: \(devices.settings(for: device).encodingJobs)",
+                            value: setting(\.encodingJobs, device), in: 1...8)
+                        .disabled(devices.busy)
                     Toggle("Sync only checked songs and videos", isOn: setting(\.checkedOnly, device))
                     Toggle("Use Album Artist as Artist on the iPod", isOn: $devices.useAlbumArtistForArtist)
                     Toggle("Import play counts when an iPod connects", isOn: $devices.automaticallyImportPlays)
@@ -291,6 +294,31 @@ struct ClassicDevicePage: View {
                     radio("Selected playlists, artists, albums and genres", selected: devices.settings(for: device).selectedMusic) {
                         setting(\.selectedMusic, device).wrappedValue = true
                     }
+                    Picker("Convert ALAC and FLAC", selection: setting(\.musicAACBitrate, device)) {
+                        Text("Off").tag(0)
+                        ForEach(ClassicEncoding.bitrates, id: \.self) { bitrate in
+                            Text("\(bitrate) kbps AAC").tag(bitrate)
+                        }
+                    }
+                    if devices.settings(for: device).musicAACBitrate > 0 {
+                        Text("AAC copies are prepared on this Mac during preview. Applying may replace existing iPod copies of the same tracks.")
+                            .foregroundStyle(.secondary)
+                    }
+                    DisclosureGroup("Album Quality Overrides") {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(LibraryEdition.editions(in: library.tracks).filter {
+                                search.isEmpty || $0.first.album.localizedCaseInsensitiveContains(search) ||
+                                    $0.first.displayAlbumArtist.localizedCaseInsensitiveContains(search)
+                            }) { edition in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(edition.first.album).bold()
+                                    Text(edition.first.displayAlbumArtist + " · " + edition.label)
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    AlbumQualityPicker(edition: edition, device: device, devices: devices)
+                                }.padding(.vertical, 5)
+                            }
+                        }
+                    }
                     if devices.settings(for: device).selectedMusic {
                         Toggle("Fill remaining space with complete albums", isOn: Binding(
                             get: { devices.settings(for: device).fillRemainingSpace == true },
@@ -406,7 +434,8 @@ struct ClassicDevicePage: View {
     private func podcasts(_ device: ClassicDevice) -> some View {
         let shows = Dictionary(grouping: library.tracks.filter { $0.podcastShow != nil }, by: { $0.podcastShow ?? "" })
         let selected = devices.settings(for: device).podcastNames
-        let showNames = Set(shows.keys).union(subscriptions.shows.map(\.show))
+        let deviceShows = device.value.contents.compactMap { $0.kind == .podcast && !$0.album.isEmpty ? $0.album : nil }
+        let showNames = Set(shows.keys).union(subscriptions.shows.map(\.show)).union(deviceShows)
         let chosenShows = showNames.filter(selected.contains).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         return VStack(alignment: .leading, spacing: 13) {
             mediaHeading("Sync Podcasts", count: "\(shows.values.reduce(0) { $0 + $1.count }.formatted()) episodes", enabled: setting(\.podcasts, device))
@@ -419,6 +448,16 @@ struct ClassicDevicePage: View {
                     .disabled(library.libraryRoot == nil || devices.busy)
             }
             Group {
+                Toggle("Limit episodes per show by default", isOn: Binding(
+                    get: { devices.settings(for: device).defaultPodcastLimit != nil },
+                    set: { setting(\.defaultPodcastLimit, device).wrappedValue = $0 ? 5 : nil }
+                ))
+                if let limit = devices.settings(for: device).defaultPodcastLimit {
+                    Stepper("Keep only the newest \(limit) episodes per show", value: Binding(
+                        get: { devices.settings(for: device).defaultPodcastLimit ?? 5 },
+                        set: { setting(\.defaultPodcastLimit, device).wrappedValue = $0 }
+                    ), in: 1...max(100, limit))
+                }
                 choices("Podcasts", unique(Array(showNames)), setting(\.podcastNames, device))
                 if !chosenShows.isEmpty {
                     let show = podcastShowForOptions.flatMap { chosenShows.contains($0) ? $0 : nil } ?? chosenShows[0]
@@ -449,25 +488,10 @@ struct ClassicDevicePage: View {
         )
         return VStack(alignment: .leading, spacing: 6) {
             Picker("Keep", selection: Binding(
-                get: {
-                    let value = policy.wrappedValue
-                    if value.unplayedOnly == true { return value.limit == nil ? "unplayed" : "catchup" }
-                    return value.limit == nil ? "manual" : "latest"
-                },
-                set: { mode in
-                    var value = policy.wrappedValue
-                    let unplayed = mode == "unplayed" || mode == "catchup"
-                    if value.unplayedOnly != true && unplayed { value.removeFinished = false }
-                    if !unplayed { value.removeFinished = nil }
-                    value.unplayedOnly = unplayed ? true : nil
-                    value.limit = mode == "latest" || mode == "catchup" ? value.limit ?? 5 : nil
-                    policy.wrappedValue = value
-                }
+                get: { policy.wrappedValue.mode },
+                set: { policy.wrappedValue.select($0) }
             )) {
-                Text("All checked episodes").tag("manual")
-                Text("Latest episodes").tag("latest")
-                Text("All unplayed episodes").tag("unplayed")
-                Text("Catch Up").tag("catchup")
+                ForEach(PodcastRetention.Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             if let limit = policy.wrappedValue.limit {
                 let unplayed = policy.wrappedValue.unplayedOnly == true
@@ -485,7 +509,10 @@ struct ClassicDevicePage: View {
                 Text("In-progress episodes are kept alongside the newest unplayed episodes.")
                     .foregroundStyle(.secondary)
             }
-            if policy.wrappedValue.limit != nil || policy.wrappedValue.unplayedOnly == true {
+            if devices.settings(for: device).podcastPolicy(for: show).mode == .hardCap {
+                Text("Older iSyncer copies are removed even if they’re unplayed, started, or pinned. Review removals in Sync Preview.")
+                    .foregroundStyle(.secondary)
+            } else if policy.wrappedValue.limit != nil || policy.wrappedValue.unplayedOnly == true {
                 Text("Pinned episodes stay on this iPod. Sync Preview lists managed copies to remove.")
                     .foregroundStyle(.secondary)
                 choices("Pinned Episodes", episodes.map { Choice(key: $0.id, title: $0.title) }, policy.pinned, filtered: false)
@@ -610,7 +637,7 @@ struct ClassicDevicePage: View {
                     previewCount("Bookmarks to Mac", devices.playbackImportCount(for: id))
                 }
                 .padding(.vertical, 4)
-                if plan.videoReplacementCount > 0 { Text("\(plan.videoReplacementCount.formatted()) copies replace older video encodes") }
+                if plan.replacementCount > 0 { Text("\(plan.replacementCount.formatted()) copies replace existing files") }
                 if plan.repairsPodcastIndex { Text("Repair Podcasts index on the iPod") }
                 if plan.artworkCandidates > 0 { Text("\(plan.artworkCandidates.formatted()) items to check for artwork") }
                 if plan.removedVideoArtworkCount > 0 { Text("\(plan.removedVideoArtworkCount.formatted()) video covers to clear") }
@@ -875,6 +902,12 @@ private struct SyncDetailsSheet: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(item.title)
                             if !item.detail.isEmpty { Text(item.detail).font(.caption).foregroundStyle(.secondary) }
+                            if let bytes = item.bytesFreed {
+                                Text("\(Format.bytes(bytes)) to free").font(.caption).foregroundStyle(.secondary)
+                            }
+                            if item.inProgress == true {
+                                Label("In progress", systemImage: "play.circle").font(.caption.bold())
+                            }
                             if let changes = item.metadataChanges, !changes.isEmpty {
                                 DisclosureGroup(item.action == .bookmark || item.action == .importBookmark ? "Compare Progress" : "Compare Metadata") { MetadataComparison(changes: changes) }
                             }

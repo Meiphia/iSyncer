@@ -3,6 +3,7 @@ import Combine
 
 enum SourceSelection: Hashable {
     case library
+    case artists
     case partyShuffle
     case smart(String)        // Top 25 Most Played, Recently Played, Recently Added, My Top Rated
     case playlist(UUID)
@@ -61,6 +62,7 @@ final class BrowserModel: ObservableObject {
     }
     @Published var showVisualizer = false
     @Published var showCoverFlow = false
+    @Published var showExpandedPlayer = false
     /// Column browser selections; empty = All. Cmd/Shift-click picks several.
     @Published var genreSel = Set<String>() { didSet { if genreSel != oldValue { artistSel = []; albumSel = []; recompute() } } }
     @Published var artistSel = Set<String>() { didSet { if artistSel != oldValue { albumSel = []; recompute() } } }
@@ -175,7 +177,7 @@ final class BrowserModel: ObservableObject {
     func recompute() {
         var base: [Track]
         switch source {
-        case .library: base = library.tracks.filter(\.isMusic)
+        case .library, .artists: base = library.tracks.filter(\.isMusic)
         case .podcasts: base = library.tracks.filter { $0.podcastShow != nil && (!showUnplayedPodcasts || $0.finishedListening != true) }
         case .audiobooks: base = library.tracks.filter { $0.audiobookTitle != nil }
         case .playlist(let id): base = library.playlist(id).map { library.tracks(in: $0) } ?? []

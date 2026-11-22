@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private struct LibraryEdition: Identifiable {
+struct LibraryEdition: Identifiable {
     let id: String
     let tracks: [Track]
 
@@ -134,6 +134,7 @@ struct CoverFlowView: View {
 
 private struct FlowCover: View {
     let track: Track
+    @ObservedObject private var loader = ArtworkLoader.shared
     @State private var image: NSImage?
     var body: some View {
         ZStack {
@@ -141,7 +142,7 @@ private struct FlowCover: View {
             if let image { Image(nsImage: image).resizable().aspectRatio(contentMode: .fit) }
             else { Image(systemName: "music.note").font(.largeTitle).foregroundStyle(.secondary) }
         }
-        .task(id: track.id) { image = await ArtworkLoader.shared.image(for: track) }
+        .task(id: [track.id, String(loader.podcastRevision)]) { image = await loader.image(for: track) }
     }
 }
 

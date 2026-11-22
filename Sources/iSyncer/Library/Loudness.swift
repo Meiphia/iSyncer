@@ -66,7 +66,7 @@ final class LoudnessAnalyzer: ObservableObject {
                     guard next < jobs.count, !Task.isCancelled else { return }
                     let t = jobs[next]
                     next += 1
-                    let url = root.appendingPathComponent(t.id)
+                    let url = root.appendingLibraryPath(t.id)
                     pool.addTask { (t.id, await Self.measure(url)) }
                 }
                 for _ in 0..<4 { add() }
@@ -148,7 +148,7 @@ final class LoudnessAnalyzer: ObservableObject {
 
     nonisolated private static func writeTags(_ values: [String: AudioProcessor.Gains], root: URL) async {
         for (id, g) in values {
-            let url = root.appendingPathComponent(id)
+            let url = root.appendingLibraryPath(id)
             guard TagWriter.canEdit(url), !["m4a", "mp4", "aac", "alac"].contains(url.pathExtension.lowercased()),
                   let tg = g.track, let ag = g.album,
                   TagReader.read(url: url)?.rgTrackGain == nil else { continue }

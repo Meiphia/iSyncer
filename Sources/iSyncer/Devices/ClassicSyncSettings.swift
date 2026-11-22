@@ -18,10 +18,35 @@ struct ClassicSyncSettings: Codable, Equatable {
     var tvOverrides: [String: [Int: TVSeasonSelection]]? = nil
     var podcastNames: Set<String> = []
     var podcastRetention: [String: PodcastRetention]? = nil
+    var defaultPodcastLimit: Int? = nil
     var syncAudiobooks: Bool? = nil
     var selectedAudiobooks: Set<String>? = nil
     var fillRemainingSpace: Bool? = nil
     var reserveGB: Int? = nil
+    var aacBitrate: Int? = nil
+    var albumAACBitrates: [String: Int]? = nil
+    var parallelEncodes: Int? = nil
+
+    var musicAACBitrate: Int {
+        get { ClassicEncoding.bitrates.contains(aacBitrate ?? 0) ? aacBitrate ?? 0 : 0 }
+        set { aacBitrate = newValue == 0 ? nil : newValue }
+    }
+
+    func aacBitrate(for track: Track) -> Int {
+        let override = albumAACBitrates?[track.classicEditionKey]
+        return override.map { ClassicEncoding.bitrates.contains($0) ? $0 : 0 } ?? musicAACBitrate
+    }
+
+    mutating func setAlbumBitrate(_ bitrate: Int?, edition: String) {
+        var overrides = albumAACBitrates ?? [:]
+        overrides[edition] = bitrate
+        albumAACBitrates = overrides.isEmpty ? nil : overrides
+    }
+
+    var encodingJobs: Int {
+        get { max(1, min(8, parallelEncodes ?? ClassicEncoding.defaultJobs)) }
+        set { parallelEncodes = newValue }
+    }
 
     var audiobooks: Bool {
         get { syncAudiobooks ?? false }
@@ -37,6 +62,15 @@ struct ClassicSyncSettings: Codable, Equatable {
         var policies = podcastRetention ?? [:]
         policies[show] = value == PodcastRetention() ? nil : value
         podcastRetention = policies.isEmpty ? nil : policies
+    }
+
+    func podcastPolicy(for show: String) -> PodcastRetention {
+        let policy = podcastRetention?[show] ?? PodcastRetention()
+        guard policy.mode == .useDefault, let defaultPodcastLimit else { return policy }
+        var effective = policy
+        effective.explicitMode = .hardCap
+        effective.limit = max(1, defaultPodcastLimit)
+        return effective
     }
 
     func includesTVEpisode(_ episode: VideoItem) -> Bool {
@@ -101,10 +135,36 @@ struct ClassicSyncSettings: Codable, Equatable {
 }
 
 struct PodcastRetention: Codable, Equatable {
+    enum Mode: String, CaseIterable, Codable {
+        case useDefault = "Use iPod Default"
+        case all = "All Episodes"
+        case checked = "All Checked Episodes"
+        case hardCap = "Keep Only the Newest"
+        case latest = "Latest Episodes + Pinned"
+        case unplayed = "All Unplayed Episodes"
+        case catchUp = "Catch Up"
+    }
+
     var limit: Int? = nil
     var pinned: Set<String> = []
     var unplayedOnly: Bool? = nil
     var removeFinished: Bool? = nil
+    var explicitMode: Mode? = nil
+
+    var mode: Mode {
+        if let explicitMode { return explicitMode }
+        if unplayedOnly == true { return limit == nil ? .unplayed : .catchUp }
+        return limit == nil ? .useDefault : .latest
+    }
+
+    mutating func select(_ mode: Mode) {
+        let unplayed = mode == .unplayed || mode == .catchUp
+        if unplayedOnly != true && unplayed { removeFinished = false }
+        if !unplayed { removeFinished = nil }
+        unplayedOnly = unplayed ? true : nil
+        limit = [.hardCap, .latest, .catchUp].contains(mode) ? limit ?? 5 : nil
+        explicitMode = mode == .useDefault ? nil : mode
+    }
 
     // Older Unplayed rules also pruned finished episodes. Keep that behavior on upgrade.
     var removesFinished: Bool { removeFinished ?? (unplayedOnly == true) }

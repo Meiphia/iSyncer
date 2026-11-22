@@ -48,6 +48,7 @@ struct VideoPage: View {
             .background(Color.white)
         } else {
             VStack(spacing: 0) {
+                GlossyHeader(title: "Videos")
                 HStack {
                     Picker("View", selection: $posters) {
                         Text("Posters").tag(true)
@@ -343,15 +344,16 @@ struct VideoPage: View {
                     posterEpisodes(shows[show] ?? [], show: show)
                 } else {
                     if !inProgress.isEmpty {
-                        Text("Continue Watching").font(.headline)
+                        posterSectionHeader("Continue Watching")
                         ScrollView(.horizontal) {
                             HStack(alignment: .top, spacing: 14) {
                                 ForEach(inProgress.prefix(10)) { card($0, label: $0.title) { playing = $0 } }
                             }
+                            .padding(.horizontal, 12)
                         }
                     }
                     if !shows.isEmpty {
-                        Text("TV Shows").font(.headline)
+                        posterSectionHeader("TV Shows")
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 126), alignment: .top)], alignment: .leading, spacing: 14) {
                             ForEach(shows.keys.sorted(), id: \.self) { show in
                                 if let first = shows[show]?.min(by: VideoItem.episodeOrder) {
@@ -359,20 +361,30 @@ struct VideoPage: View {
                                 }
                             }
                         }
+                        .padding(.horizontal, 12)
                     }
                     let movies = videos.filter { $0.kind != .tv }.sorted { $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending }
                     if !movies.isEmpty {
-                        Text("Movies & Other Videos").font(.headline)
+                        posterSectionHeader("Movies & Other Videos")
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 126), alignment: .top)], alignment: .leading, spacing: 14) {
                             ForEach(movies) { card($0, label: $0.displayTitle) { playing = $0 } }
                         }
+                        .padding(.horizontal, 12)
                     }
                 }
             }
             .padding(.vertical, 12)
-            .padding(.horizontal, posterShow == nil ? 12 : 0)
             .frame(maxWidth: .infinity, alignment: .leading)
         }.background(.white)
+    }
+
+    private func posterSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(textSize.bold(11))
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .paneHeader()
+            .accessibilityAddTraits(.isHeader)
     }
 
     @ViewBuilder
@@ -731,12 +743,7 @@ struct VideoColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(title)
-                .font(.system(size: 11 + textSize.extra, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 3)
-                .background(LinearGradient(colors: [Theme.hex(0xF4F4F4), Theme.hex(0xD9D9D9)], startPoint: .top, endPoint: .bottom))
-                .overlay(alignment: .bottom) { Rectangle().fill(Theme.hex(0xA0A0A0)).frame(height: 1) }
+            GlossyHeader(title: title)
             List(selection: Binding<String?>(
                 get: { selection ?? Self.allTag },
                 set: { selection = ($0 == Self.allTag) ? nil : $0 })) {

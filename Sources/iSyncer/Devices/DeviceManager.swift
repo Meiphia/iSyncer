@@ -17,6 +17,8 @@ struct DeviceSyncReport: Codable {
 @MainActor
 final class DeviceManager: ObservableObject {
     static let shared = DeviceManager()
+    static let showOnConnectKey = "showClassicIPodOnConnect"
+    let didConnect = PassthroughSubject<UUID, Never>()
 
     @Published private(set) var connected: [ClassicDevice] = []
     @Published private(set) var busy = false {
@@ -31,6 +33,11 @@ final class DeviceManager: ObservableObject {
     @Published private(set) var skipped: [SyncItem] = []
     @Published private(set) var lastReports: [String: DeviceSyncReport] = [:]
     @Published private(set) var playImportResults: [String: String] = [:]
+    @Published private(set) var conversionCacheParent: URL? = UserDefaults.standard.string(forKey: "classicConversionCacheParent")
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+    var conversionCache: ConversionCache {
+        ConversionCache(defaultFolder: LibraryStore.supportFolder, parent: conversionCacheParent)
+    }
     @Published var automaticallyImportPlays = UserDefaults.standard.bool(forKey: "automaticallyImportClassicPlays") {
         didSet {
             UserDefaults.standard.set(automaticallyImportPlays, forKey: "automaticallyImportClassicPlays")
@@ -47,6 +54,16 @@ final class DeviceManager: ObservableObject {
 
     func settings(for device: ClassicDevice) -> ClassicSyncSettings {
         settings[device.value.settingsID] ?? ClassicSyncSettings()
+    }
+
+    func reloadSettings() {
+        settings = UserDefaults.standard.data(forKey: "classicSyncSettings").flatMap {
+            try? JSONDecoder().decode([String: ClassicSyncSettings].self, from: $0)
+        } ?? [:]
+        playbackBaselines = UserDefaults.standard.data(forKey: "iPodPlaybackBaselines").flatMap {
+            try? JSONDecoder().decode([String: [String: ClassicListeningState]].self, from: $0)
+        } ?? [:]
+        discardPreview()
     }
 
     func setSettings(_ value: ClassicSyncSettings, for device: ClassicDevice) {
@@ -70,6 +87,11 @@ final class DeviceManager: ObservableObject {
         discardPreview()
     }
 
+    func collectionDidChange() {
+        libraryGeneration += 1
+        discardPreview()
+    }
+
     func discardPreview() {
         playbackPreview = nil
         playbackConflict = nil
@@ -78,6 +100,22 @@ final class DeviceManager: ObservableObject {
         previewPlayed = []
         previewWatched = []
         status = ""
+    }
+
+    func changeConversionCache(to destination: ConversionCache, move: Bool) async throws -> Int {
+        guard !busy else { throw SyncError("Wait for the current iPod operation to finish.") }
+        let source = conversionCache
+        guard source != destination else { return 0 }
+        busy = true
+        defer { busy = false }
+        let kept = try await Task.detached(priority: .utility) {
+            try destination.prepare()
+            return move ? try source.moveFiles(to: destination) : 0
+        }.value
+        conversionCacheParent = destination.parent
+        UserDefaults.standard.set(destination.parent?.path, forKey: "classicConversionCacheParent")
+        discardPreview()
+        return kept
     }
     @Published var useAlbumArtistForArtist = UserDefaults.standard.object(forKey: "useAlbumArtistForArtist") as? Bool
         ?? UserDefaults.standard.bool(forKey: "normalizeAlbumArtist") {
@@ -91,6 +129,7 @@ final class DeviceManager: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
     private var identities: [URL: UUID] = [:]
     private var refreshGeneration = 0
+    private var newlyMountedPaths = Set<String>()
     private var libraryGeneration = 0
     private var plannedDevice: UUID?
     private var playbackPreview: PlaybackProgressSync?
@@ -111,14 +150,29 @@ final class DeviceManager: ObservableObject {
         }
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in await self?.refresh() }
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let path = (notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)?.standardizedFileURL.path
+                let mounted = notification.name == NSWorkspace.didMountNotification
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let path {
+                        if mounted { self.newlyMountedPaths.insert(path) }
+                        else { self.newlyMountedPaths.remove(path) }
+                        let library = LibraryStore.shared
+                        if library.libraryFolders.contains(where: { $0.path == path || $0.path.hasPrefix(path + "/") }) {
+                            library.objectWillChange.send()
+                            if !library.foldersBusy { library.scan() }
+                        }
+                    }
+                    await self.refresh()
+                }
             })
         }
         let library = LibraryStore.shared
         Publishers.MergeMany(
             VideoWatchHistory.shared.$watchedRevision.map { _ in () }.eraseToAnyPublisher(),
             library.$libraryRoot.map { _ in () }.eraseToAnyPublisher(),
+            library.$libraryFolders.map { _ in () }.eraseToAnyPublisher(),
             library.$tracks.map { _ in () }.eraseToAnyPublisher(),
             library.$unchecked.map { _ in () }.eraseToAnyPublisher(),
             library.$playlists.map { _ in () }.eraseToAnyPublisher(),
@@ -250,10 +304,18 @@ final class DeviceManager: ObservableObject {
             return ClassicDevice(id: id, value: value)
         }
         let current = Set(connected.map(\.id))
+        let newDevice = connected.first {
+            !previous.contains($0.id) && newlyMountedPaths.contains($0.value.mount.standardizedFileURL.path)
+        }
+        newlyMountedPaths.removeAll()
         pendingPlayImports.formIntersection(current)
         if automaticallyImportPlays { pendingPlayImports.formUnion(current.subtracting(previous)) }
         if let plannedDevice, device(plannedDevice) == nil { discardPreview() }
         if let playbackConflict, device(playbackConflict.device) == nil { cancelPlaybackConflict() }
+        if let newDevice, !busy, plan == nil, playbackConflict == nil,
+           UserDefaults.standard.bool(forKey: Self.showOnConnectKey) {
+            didConnect.send(newDevice.id)
+        }
         await importPendingPlays()
     }
 
@@ -341,7 +403,7 @@ final class DeviceManager: ObservableObject {
                 playlistTracks.contains(track.id) || selection.artists.contains(track.displayAlbumArtist) ||
                 selection.albums.contains(track.classicAlbumKey) || selection.albums.contains(track.classicEditionKey) ||
                 selection.genres.contains(track.genre) ||
-                (selection.fillRemainingSpace == true && retry?.contains(root.appendingPathComponent(track.id)) == true))
+                (selection.fillRemainingSpace == true && retry?.contains(root.appendingLibraryPath(track.id)) == true))
         }
         let fillTracks = selection.music && selection.selectedMusic && selection.fillRemainingSpace == true && retry == nil
             ? eligible.filter { $0.isMusic } : []
@@ -352,20 +414,20 @@ final class DeviceManager: ObservableObject {
                 let a = first.map(\.rating).max() ?? 0, b = second.map(\.rating).max() ?? 0
                 return a == b ? first[0].id < second[0].id : a > b
             }
-            .map { group in group.map { root.appendingPathComponent($0.id) } }
-        let selectedURLs = Set(tracks.map { root.appendingPathComponent($0.id) })
+            .map { group in group.map { root.appendingLibraryPath($0.id) } }
+        let selectedURLs = Set(tracks.map { root.appendingLibraryPath($0.id) })
         let fillURLs = Set(fillGroups.flatMap { $0 }).subtracting(selectedURLs)
-        let retention = selection.podcastRetention ?? [:]
-        let unresolvedRelink = !library.missingRelinkPaths.isEmpty
+        let retention = Dictionary(uniqueKeysWithValues: selection.podcastNames.map { ($0, selection.podcastPolicy(for: $0)) })
+        let unresolvedRelink = !library.missingRelinkPaths.isEmpty || !library.libraryFolders.allSatisfy(LibraryFolders.available)
         let podcasts = selection.podcasts ? library.tracks.compactMap { track -> (URL, String)? in
             guard let show = track.podcastShow, selection.podcastNames.contains(show) else { return nil }
-            let pinned = retention[show]?.pinned.contains(track.id) == true
-            guard pinned || !selection.checkedOnly || library.isChecked(track.id) else { return nil }
-            return (root.appendingPathComponent(track.id), show)
+            let pinned = retention[show]?.mode != .hardCap && retention[show]?.pinned.contains(track.id) == true
+            guard retention[show]?.mode == .all || pinned || !selection.checkedOnly || library.isChecked(track.id) else { return nil }
+            return (root.appendingLibraryPath(track.id), show)
         } : []
         let audiobooks = selection.audiobooks ? eligible.compactMap { track -> (URL, String)? in
             guard let book = track.audiobookTitle, selection.audiobookNames.contains(book) else { return nil }
-            return (root.appendingPathComponent(track.id), book)
+            return (root.appendingLibraryPath(track.id), book)
         } : []
         let videoItems = library.videos
         let tvRules = selection.tvRetention ?? [:]
@@ -374,7 +436,7 @@ final class DeviceManager: ObservableObject {
             $0.kind == .tv && VideoWatchHistory.shared.state(at: library.url(forVideo: $0)).watched
         }.map(\.id))
         let videoEdits = Dictionary(uniqueKeysWithValues: videoItems.compactMap { item in
-            let url = root.appendingPathComponent(item.id)
+            let url = root.appendingLibraryPath(item.id)
             return library.videoMetadata(for: url).map { (url, $0) }
         })
         var options = SyncOptions()
@@ -384,19 +446,19 @@ final class DeviceManager: ObservableObject {
         })
         options.fillReserve = Int64(max(0, min(250, selection.reserveGB ?? 2))) * 1_000_000_000
         options.matchMusicByPath = Set((tracks + fillTracks).filter { ambiguousAlbums.contains($0.classicAlbumKey) }.map {
-            root.appendingPathComponent($0.id)
+            root.appendingLibraryPath($0.id)
         })
         do {
             let urls = Set(podcasts.map { $0.0 }).union(audiobooks.map { $0.0 })
             options.listening = Dictionary(uniqueKeysWithValues: library.tracks.compactMap { track in
-                let url = root.appendingPathComponent(track.id)
+                let url = root.appendingLibraryPath(track.id)
                 guard urls.contains(url), track.resumePosition != nil || track.finishedListening != nil else { return nil }
                 return (url, ClassicListeningState(seconds: track.resumePosition ?? 0, played: track.finishedListening ?? false))
             })
         }
         if selection.tvShows || selection.movies {
             for item in videoItems {
-                let url = root.appendingPathComponent(item.id)
+                let url = root.appendingLibraryPath(item.id)
                 let state = VideoWatchHistory.shared.state(at: url)
                 guard state.updated != .distantPast else { continue }
                 options.listening[url] = ClassicListeningState(seconds: state.seconds, played: state.watched)
@@ -419,7 +481,7 @@ final class DeviceManager: ObservableObject {
         }.map { item in
             var playlist = LocalPlaylist(name: item.name)
             playlist.id = item.id
-            playlist.paths = item.trackIDs.filter(selected.contains).map { root.appendingPathComponent($0).path }
+            playlist.paths = item.trackIDs.filter(selected.contains).map { root.appendingLibraryPath($0).path }
             return playlist
         }
         let playlistKey = "managedClassicPlaylists." + device.value.settingsID
@@ -441,16 +503,36 @@ final class DeviceManager: ObservableObject {
         let podcastsForRetention = Set(podcasts.filter {
             retriedShows.contains($0.1) && (retention[$0.1]?.limit != nil || retention[$0.1]?.unplayedOnly == true)
         }.map { $0.0 })
-        let urls = (tracks.map { root.appendingPathComponent($0.id) } + podcasts.map { $0.0 }
+        let urls = (tracks.map { root.appendingLibraryPath($0.id) } + podcasts.map { $0.0 }
                     + audiobooks.map { $0.0 } + Array(fillURLs)).filter { url in
             guard let retry else { return true }
             return retry.contains(url) || podcastsForRetention.contains(url)
         }
         let localPlayed = Set(library.tracks.filter { $0.finishedListening == true && $0.podcastShow != nil }
-            .map { root.appendingPathComponent($0.id) })
+            .map { root.appendingLibraryPath($0.id) })
         let podcastShows = Dictionary(podcasts, uniquingKeysWith: { first, _ in first })
         let bookTitles = Dictionary(audiobooks, uniquingKeysWith: { first, _ in first })
-        let videoCache = LibraryStore.supportFolder.appendingPathComponent("Classic Videos", isDirectory: true)
+        let conversionCache = self.conversionCache
+        let audioBitrates = Dictionary((tracks + fillTracks).map {
+            (root.appendingLibraryPath($0.id), selection.aacBitrate(for: $0))
+        }, uniquingKeysWith: { first, _ in first })
+        let albumArtwork = Dictionary(uniqueKeysWithValues: Set((tracks + fillTracks).map(\.classicEditionKey)).compactMap { key -> (String, Data)? in
+            guard let url = LibraryCollection.shared.selectedArtwork(for: key), let data = try? Data(contentsOf: url) else { return nil }
+            return (key, data)
+        })
+        let musicArtwork = Dictionary((tracks + fillTracks).compactMap { track -> (URL, Data)? in
+            albumArtwork[track.classicEditionKey].map { (root.appendingLibraryPath(track.id), $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        let reviewMusicArtwork = Set((tracks + fillTracks).filter {
+            LibraryCollection.shared.saved.galleries[$0.classicEditionKey] != nil
+        }.map { root.appendingLibraryPath($0.id) })
+        let jobs = selection.encodingJobs
+        let videoThreads = max(1, min(4, ProcessInfo.processInfo.activeProcessorCount / jobs))
+        let urlSet = Set(urls)
+        let audioToPrepare = (tracks + fillTracks).filter {
+            selection.aacBitrate(for: $0) > 0 && ClassicEncoding.shouldEncode($0) && urlSet.contains(root.appendingLibraryPath($0.id))
+        }
+        let uniqueAudio = Dictionary(audioToPrepare.map { (root.appendingLibraryPath($0.id), $0) }, uniquingKeysWith: { first, _ in first })
         let cacheFile = LibraryStore.supportFolder.appendingPathComponent("ClassicCompatibility.plist")
         do {
             let (preview, skipped, watchedOnIPod) = try await Task.detached(priority: .userInitiated) {
@@ -458,36 +540,24 @@ final class DeviceManager: ObservableObject {
                     throw SyncError("The media library folder is unavailable.")
                 }
                 let cache = LibraryCache.load(from: cacheFile)
-                let checked = try await LibraryScanner.scanFiles(urls, cache: cache)
+                let checked = try await LibraryScanner.scanFiles(urls.filter { uniqueAudio[$0] == nil }, cache: cache)
                 if retry == nil { try? LibraryCache(folders: [root], library: checked).save(to: cacheFile) }
                 let refreshedDates = await PodcastFeed.refreshReleaseDates(for: urls.filter { podcastShows[$0] != nil })
                 var syncOptions = settings
                 let failedURLs = Set((checked.failures ?? []).filter { $0.reason != "Unsupported audio file type." }.map(\.url))
-                if tracks.contains(where: { failedURLs.contains(root.appendingPathComponent($0.id)) }) {
+                if tracks.contains(where: { failedURLs.contains(root.appendingLibraryPath($0.id)) }) {
                     syncOptions.reconcileMusic = false
                 }
                 syncOptions.playedPodcastURLs = localPlayed
-                let failedShows = Set(failedURLs.compactMap { podcastShows[$0] })
+                let failedShows = Set((checked.failures ?? []).compactMap { podcastShows[$0.url] })
                 for show in selection.podcastNames where selection.podcasts {
                     guard let policy = retention[show], policy.unplayedOnly == true || policy.limit != nil else { continue }
                     syncOptions.podcastLimits[show] = PodcastSyncLimit(
-                        latest: policy.limit ?? Int.max, pinned: Set(policy.pinned.map { root.appendingPathComponent($0) }),
+                        latest: policy.limit ?? Int.max, pinned: Set(policy.pinned.map { root.appendingLibraryPath($0) }),
                         removeOlder: retry == nil && !unresolvedRelink && policy.limit != nil && !failedShows.contains(show),
                         removePlayed: retry == nil && !unresolvedRelink && policy.removesFinished && !failedShows.contains(show),
-                        unplayed: policy.unplayedOnly == true
+                        unplayed: policy.unplayedOnly == true, hardCap: policy.mode == .hardCap
                     )
-                }
-                let scanned = Dictionary(checked.songs.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
-                syncOptions.fillAlbums = fillGroups.compactMap { group in
-                    let songs = group.compactMap { scanned[$0] }
-                    return songs.count == group.count ? songs.filter { !selectedURLs.contains($0.url) } : nil
-                }
-                var media = checked.songs.filter { !fillURLs.contains($0.url) }.map { song -> Song in
-                    if let show = podcastShows[song.url] {
-                        return LibraryScanner.podcast(song, show: show, metadata: refreshedDates[song.url])
-                    }
-                    if let book = bookTitles[song.url] { return LibraryScanner.audiobook(song, book: book) }
-                    return song
                 }
                 var skipped = (checked.failures ?? []).filter { retry?.contains($0.url) ?? true }.map { failure in
                     var item = SyncItem(.skip, failure.url.deletingPathExtension().lastPathComponent, failure.reason)
@@ -496,9 +566,6 @@ final class DeviceManager: ObservableObject {
                 }
                 if unresolvedRelink {
                     skipped.append(SyncItem(.skip, "Automatic removals and playlist updates", "Some media files are still missing after relinking."))
-                }
-                if settings.reconcileMusic && !syncOptions.reconcileMusic {
-                    skipped.append(SyncItem(.skip, "Music removals", "Some selected songs could not be read."))
                 }
                 skipped += failedShows.sorted().filter { syncOptions.podcastLimits[$0] != nil }.map {
                     SyncItem(.skip, $0, "Older iPod copies were kept because some selected episodes could not be read.")
@@ -509,7 +576,7 @@ final class DeviceManager: ObservableObject {
                 let deviceWatched = automaticShows.isEmpty ? [] :
                     try SyncEngine.readPlays(on: device.value, includeVideo: true).filter { $0.kind == .tvShow && $0.played }
                 if !automaticShows.isEmpty { syncOptions.expectedWatchedTVKeys = Set(deviceWatched.compactMap(\.videoSyncKey)) }
-                let videoKeysByURL = Dictionary(uniqueKeysWithValues: videoItems.map { (root.appendingPathComponent($0.id), $0.classicTVKey) })
+                let videoKeysByURL = Dictionary(uniqueKeysWithValues: videoItems.map { (root.appendingLibraryPath($0.id), $0.classicTVKey) })
                 let corrections = syncOptions.episodeCorrections
                 let watchedKeys = Set(deviceWatched.compactMap { play in
                     let target = corrections.first { correction in
@@ -526,7 +593,7 @@ final class DeviceManager: ObservableObject {
                     let eligible = episodes.filter { episode in
                         let onDevice = watchedKeys.contains(episode.classicTVKey)
                         if onDevice, !watchedLocally.contains(episode.id) {
-                            watchedOnIPod.insert(root.appendingPathComponent(episode.id))
+                            watchedOnIPod.insert(root.appendingLibraryPath(episode.id))
                         }
                         return eligibleVideoIDs.contains(episode.id) && selection.includesTVEpisode(episode)
                             && !onDevice && !watchedLocally.contains(episode.id) && !rule.pinned.contains(episode.id)
@@ -542,7 +609,7 @@ final class DeviceManager: ObservableObject {
                     }
                 }
                 let videosToPrepare = videoItems.compactMap { item -> ClassicVideo? in
-                    let url = root.appendingPathComponent(item.id)
+                    let url = root.appendingLibraryPath(item.id)
                     guard retry?.contains(url) ?? true else { return nil }
                     if item.kind == .tv {
                         guard selection.tvShows, !item.show.isEmpty else { return nil }
@@ -557,24 +624,85 @@ final class DeviceManager: ObservableObject {
                     return ClassicVideo(url: url, title: item.title, show: item.kind == .tv ? item.show : "",
                                         season: item.season, episode: item.episode, year: item.year)
                 }
-                for (index, video) in videosToPrepare.enumerated() {
+                let work = uniqueAudio.sorted { $0.key.path < $1.key.path }.map { url, track in
+                    EncodingWork.audio(url, track)
+                } + videosToPrepare.map(EncodingWork.video)
+                if !work.isEmpty {
                     await MainActor.run {
-                        self.status = "Preparing video \(index + 1) of \(videosToPrepare.count) · \(video.title)"
-                        self.progress = Double(index) / Double(videosToPrepare.count)
-                    }
-                    do {
-                        let song = try await ClassicVideoConversion.prepare(video, cache: videoCache)
-                        media.append(song.applyingVideoEdit(videoEdits[video.url]))
-                    }
-                    catch {
-                        if automaticShows.contains(video.show) {
-                            syncOptions.expiredTVKeys.subtract((tvGroups[video.show] ?? []).map(\.classicTVKey))
-                        }
-                        var item = SyncItem(.skip, videoEdits[video.url]?.title ?? video.title, error.localizedDescription)
-                        item.sourceURL = video.url
-                        skipped.append(item)
+                        self.status = "Preparing media for iPod…"
+                        self.progress = 0
                     }
                 }
+                let converted = try await ClassicEncoding.prepare(work, jobs: jobs, operation: { item in
+                    do {
+                        switch item {
+                        case .audio(let url, let track):
+                            try conversionCache.checkAvailable()
+                            let song = try await ClassicEncoding.audio(track, source: url, bitrate: audioBitrates[url] ?? 256, cache: conversionCache.audio)
+                            return EncodingResult.song(song)
+                        case .video(let video):
+                            let song = try await ClassicVideoConversion.prepare(video, cache: conversionCache, threads: videoThreads)
+                            return EncodingResult.song(song.applyingVideoEdit(videoEdits[video.url]))
+                        }
+                    } catch {
+                        return EncodingResult.failed(error.localizedDescription)
+                    }
+                }, progress: { completed, total in
+                    await MainActor.run {
+                        self.status = "Prepared \(completed.formatted()) of \(total.formatted()) media files"
+                        self.progress = Double(completed) / Double(total)
+                    }
+                })
+                var scanned = Dictionary(checked.songs.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+                var videos: [Song] = []
+                for (item, result) in zip(work, converted) {
+                    switch result {
+                    case .song(let song):
+                        switch item {
+                        case .audio(let url, _): scanned[url] = song
+                        case .video: videos.append(song)
+                        }
+                    case .failed(let reason):
+                        var title: String
+                        let url: URL
+                        switch item {
+                        case .audio(let source, let track):
+                            title = track.title
+                            url = source
+                            if selectedURLs.contains(source) {
+                                syncOptions.reconcileMusic = false
+                                syncOptions.playlists = []
+                                syncOptions.removedPlaylists = []
+                            }
+                        case .video(let video):
+                            title = videoEdits[video.url]?.title ?? video.title
+                            url = video.url
+                            if automaticShows.contains(video.show) {
+                                syncOptions.expiredTVKeys.subtract((tvGroups[video.show] ?? []).map(\.classicTVKey))
+                            }
+                        }
+                        var failure = SyncItem(.skip, title, reason)
+                        failure.sourceURL = url
+                        skipped.append(failure)
+                    }
+                }
+                if settings.reconcileMusic && !syncOptions.reconcileMusic {
+                    skipped.append(SyncItem(.skip, "Music removals", "Some selected songs could not be prepared."))
+                }
+                syncOptions.fillAlbums = fillGroups.compactMap { group in
+                    let songs = group.compactMap { scanned[$0] }
+                    return songs.count == group.count ? group.filter { !selectedURLs.contains($0) }.compactMap { url in
+                        scanned[url]?.usingMusicArtwork(musicArtwork[url], review: reviewMusicArtwork.contains(url))
+                    } : nil
+                }
+                let media = urls.filter { !fillURLs.contains($0) }.compactMap { url -> Song? in
+                    guard let song = scanned[url] else { return nil }
+                    if let show = podcastShows[url] {
+                        return LibraryScanner.podcast(song, show: show, metadata: refreshedDates[url])
+                    }
+                    if let book = bookTitles[url] { return LibraryScanner.audiobook(song, book: book) }
+                    return song.usingMusicArtwork(musicArtwork[url], review: reviewMusicArtwork.contains(url))
+                } + videos
                 return (try SyncEngine.preview(media, on: device.value, options: syncOptions), skipped, watchedOnIPod)
             }.value
             guard generation == libraryGeneration, !library.isScanning, !library.isScanningVideos,
@@ -778,7 +906,7 @@ final class DeviceManager: ObservableObject {
                     canStop = false
                     status = title
                 } else if !stop.isRequested {
-                    let action = plan.isVideoReplacement(at: current) ? "Replacing" : "Copying"
+                    let action = plan.isReplacement(at: current) ? "Replacing" : "Copying"
                     status = title == "Preparing artwork…"
                         ? "\(title) \(current.formatted()) of \(total.formatted())"
                         : "\(action) \((current + 1).formatted()) of \(total.formatted()) · \(title)"
@@ -816,7 +944,7 @@ final class DeviceManager: ObservableObject {
                     VideoWatchHistory.shared.update(url, seconds: 0, duration: 0, watched: true)
                 }
             }
-            let replaced = plan.videoReplacements(inCompletedTransfers: count)
+            let replaced = plan.replacements(inCompletedTransfers: count)
             let added = count - replaced
             let removed = report.filter { $0.action == .remove }.count
             let changes = [
@@ -858,4 +986,14 @@ final class DeviceManager: ObservableObject {
             message = error.localizedDescription
         }
     }
+}
+
+private enum EncodingWork: Sendable {
+    case audio(URL, Track)
+    case video(ClassicVideo)
+}
+
+private enum EncodingResult: Sendable {
+    case song(Song)
+    case failed(String)
 }

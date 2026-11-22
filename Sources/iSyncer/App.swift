@@ -69,10 +69,15 @@ struct iSyncerApp: App {
             }
             CommandGroup(after: .newItem) {
                 Divider()
-                Button("Choose Media Library…") { chooseLibraryFolder(.shared) }
+                Button("Add Media Folders…") { chooseLibraryFolder(.shared) }
                     .keyboardShortcut("o")
                 Button("Rescan Media Library") { LibraryStore.shared.scan() }
                     .keyboardShortcut("r")
+                Menu("Library Backup & Export") {
+                    Button("Export Library Backup…") { LibraryBackupController.shared.export() }
+                    Button("Restore Library Backup…") { LibraryBackupController.shared.restore() }
+                    Button("Export Playlists as M3U8…") { LibraryBackupController.shared.exportPlaylists() }
+                }
                 Button("Import Inbox…") { showInbox = true }
                     .disabled(library.libraryRoot == nil)
                 Button("Relink Media Folder…") { relink() }
@@ -140,6 +145,7 @@ struct iSyncerApp: App {
                 Button("Show Artwork") { browser.showArtwork.toggle() }
                     .keyboardShortcut("g")
                 Button("Show Album Artwork") { browser.showAlbumArtwork.toggle() }
+                Button("Expanded Now Playing") { browser.showExpandedPlayer.toggle() }
                 Divider()
                 Button("Equalizer") { EqualizerWindowController.shared.toggle() }
                     .keyboardShortcut("2", modifiers: [.command, .option])

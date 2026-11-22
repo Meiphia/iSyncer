@@ -22,7 +22,7 @@ public struct LocalPlaylist: Codable, Identifiable, Sendable {
             }
             return limit.map { Array(matching.prefix(max(0, $0))) } ?? matching
         }
-        let byPath = Dictionary(songs.map { ($0.url.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let byPath = Dictionary(songs.map { (($0.originalSource ?? $0.url).path, $0) }, uniquingKeysWith: { first, _ in first })
         return paths.compactMap { byPath[$0] }
     }
 
@@ -110,13 +110,16 @@ public struct PodcastSyncLimit: Sendable {
     let removeOlder: Bool
     let removePlayed: Bool
     let unplayed: Bool
+    let hardCap: Bool
 
-    public init(latest: Int, pinned: Set<URL> = [], removeOlder: Bool = true, removePlayed: Bool = false, unplayed: Bool = false) {
+    public init(latest: Int, pinned: Set<URL> = [], removeOlder: Bool = true, removePlayed: Bool = false,
+                unplayed: Bool = false, hardCap: Bool = false) {
         self.latest = max(0, latest)
-        self.pinned = pinned
+        self.pinned = hardCap ? [] : pinned
         self.removeOlder = removeOlder
-        self.removePlayed = removePlayed
-        self.unplayed = unplayed || removePlayed
+        self.removePlayed = !hardCap && removePlayed
+        self.unplayed = !hardCap && (unplayed || removePlayed)
+        self.hardCap = hardCap
     }
 }
 

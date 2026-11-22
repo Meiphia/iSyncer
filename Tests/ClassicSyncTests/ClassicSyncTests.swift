@@ -557,6 +557,22 @@ private final class ProgressLog: @unchecked Sendable {
     #expect(prune.removedTrackCount == 1)
     #expect(prune.items.first { $0.action == .remove }?.title == finished.title)
 
+    var cap = SyncOptions()
+    var hardNewest = newest
+    hardNewest.podcastMetadata?.publishedAt = Date(timeIntervalSince1970: 2_000_000_000)
+    cap.podcastLimits["Show"] = PodcastSyncLimit(latest: 1, pinned: [episode.url], hardCap: true)
+    let capped = try SyncEngine.preview([hardNewest, episode, finished], on: withFinished, options: cap)
+    #expect(capped.pending.map(\.title) == [newest.title])
+    #expect(capped.removedTrackCount == 2)
+    let startedRemoval = capped.items.first { $0.action == .remove && $0.title == episode.title }
+    #expect(startedRemoval?.inProgress == true)
+    #expect(startedRemoval?.bytesFreed == 1024)
+    #expect(startedRemoval?.detail.contains("newest 1") == true)
+
+    cap.podcastLimits["Show"] = PodcastSyncLimit(latest: 3, hardCap: true)
+    let macKeptOnlyNewest = try SyncEngine.preview([hardNewest], on: withFinished, options: cap)
+    #expect(macKeptOnlyNewest.pending.map(\.title) == [newest.title])
+    #expect(macKeptOnlyNewest.removedTrackCount == 0)
 
 
     // A renumbered TV episode can update an already-converted copy without another transfer.
@@ -579,6 +595,48 @@ private final class ProgressLog: @unchecked Sendable {
     #expect(after.videoSyncKey?.hasPrefix("tv:2:7:") == true)
     #expect(try !SyncEngine.preview([], on: refreshed, options: correction).hasChanges)
 
+    let original = try source("Lossless", kind: .music)
+    let initialAudio = try SyncEngine.preview([original], on: refreshed)
+    #expect(try SyncEngine.apply(initialAudio, backups: backups) { _, _, _ in } == 1)
+    let withOriginal = try Device.inspect(mount)
+    let oldTrack = try #require(withOriginal.contents.first { $0.title == original.title })
+    let originalStamp = AudioTransferSource(url: original.url, size: original.size, date: original.modificationDate)
+    let cache = try source("Cached AAC", kind: .music)
+    let aac = cache.usingAudioSource(originalStamp, bitrate: 192, title: original.title, artist: original.artist,
+                                    album: original.album, albumArtist: original.albumArtist, genre: "",
+                                    year: 0, number: 0, disc: 0)
+    let duplicateSource = try source("Other", kind: .music)
+    let duplicate = cache.usingAudioSource(.init(url: duplicateSource.url, size: duplicateSource.size,
+                                                date: duplicateSource.modificationDate),
+                                          bitrate: 192, title: original.title, artist: original.artist,
+                                          album: original.album, albumArtist: original.albumArtist, genre: "",
+                                          year: 0, number: 0, disc: 0)
+    #expect(aac.transferPath != duplicate.transferPath)
+    var list = LocalPlaylist(name: "Converted")
+    list.paths = [original.url.path]
+    var audioOptions = SyncOptions()
+    audioOptions.playlists = [list]
+    audioOptions.reconcileMusic = true
+    let audioPreview = try SyncEngine.preview([aac], on: withOriginal, options: audioOptions)
+    #expect(audioPreview.replacementCount == 1)
+    #expect(audioPreview.removedTrackCount == 0)
+    #expect(audioPreview.items.first?.sourceURL == original.url)
+    #expect(try SyncEngine.apply(audioPreview, backups: backups) { _, _, _ in } == 1)
+    let withAAC = try Device.inspect(mount)
+    let newTrack = try #require(withAAC.contents.first { $0.title == original.title })
+    #expect(withAAC.trackCount == withOriginal.trackCount)
+    #expect(newTrack.persistentID == oldTrack.persistentID)
+    #expect(newTrack.fileExtension == "m4a")
+    let audioDB = try Database(Data(contentsOf: database))
+    #expect(try audioDB.playlistUpdates()[list.deviceID]?.paths == [aac.transferPath.lowercased()])
+    #expect(try !SyncEngine.preview([aac], on: withAAC, options: audioOptions).hasChanges)
+
+    cap.podcastLimits["Show"] = PodcastSyncLimit(latest: 1, hardCap: true)
+    let finalCap = try SyncEngine.preview([hardNewest], on: withAAC, options: cap)
+    #expect(try SyncEngine.apply(finalCap, backups: backups) { _, _, _ in } == 1)
+    let finalDevice = try Device.inspect(mount)
+    #expect(finalDevice.contents.filter { $0.kind == .podcast }.map(\.title) == [newest.title])
+    #expect(try !SyncEngine.preview([hardNewest], on: finalDevice, options: cap).hasChanges)
 }
 
 @Test func playbackProgressReconciliation() {

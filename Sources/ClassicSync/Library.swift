@@ -49,6 +49,29 @@ public struct PodcastMetadata: Codable, Equatable, Sendable {
     }
 }
 
+public struct AudioTransferSource: Codable, Equatable, Sendable {
+    public static let aacBitrates = [128, 192, 256, 320]
+    public let url: URL
+    public let size: Int
+    public let date: Date
+
+    public init(url: URL, size: Int, date: Date) {
+        self.url = url
+        self.size = size
+        self.date = date
+    }
+
+    public func aacIdentity(bitrate: Int) -> String {
+        "aac-lc-v1\0\(bitrate)\0\(url.path)\0\(size)\0\(date.timeIntervalSinceReferenceDate)"
+    }
+
+    public func isCurrent() throws -> Bool {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
+        return values.isRegularFile == true && values.isSymbolicLink != true &&
+            values.fileSize == size && values.contentModificationDate == date
+    }
+}
+
 public struct Song: Codable, Equatable, Identifiable, Sendable {
     public var id: URL { url }
     public var mediaType: ClassicMediaKind { classification }
@@ -76,8 +99,13 @@ public struct Song: Codable, Equatable, Identifiable, Sendable {
     var season: Int? = nil
     var episode: Int? = nil
     var previousVideoEncoding: URL? = nil
+    var videoTransferURL: URL? = nil
     var originalSource: URL? = nil
+    var audioSource: AudioTransferSource? = nil
+    var aacTransferBitrate: Int? = nil
     var videoMetadata: VideoMetadata? = nil
+    var musicArtwork: Data? = nil
+    var reviewsMusicArtwork = false
     var classification: ClassicMediaKind { mediaKind ?? .music }
     var group: String { album }
     var videoSyncKeys: [String] {
@@ -124,10 +152,34 @@ public struct Song: Codable, Equatable, Identifiable, Sendable {
         return song
     }
 
-    public func replacingVideoEncoding(at previousURL: URL) -> Song {
+    public func usingMusicArtwork(_ data: Data?, review: Bool = false) -> Song {
         var song = self
+        song.musicArtwork = data
+        song.reviewsMusicArtwork = data != nil || review
+        return song
+    }
+
+    public func usingVideoEncoding(transferURL: URL, previousURL: URL) -> Song {
+        var song = self
+        song.videoTransferURL = transferURL
         song.previousVideoEncoding = previousURL
         return song
+    }
+
+    public func usingAudioSource(_ source: AudioTransferSource, bitrate: Int, title: String, artist: String,
+                                 album: String, albumArtist: String, genre: String, year: Int, number: Int, disc: Int) -> Song {
+        Song(url: url, title: title, artist: artist, album: album, albumArtist: albumArtist, genre: genre,
+             composer: composer, duration: duration, size: size, number: number, trackCount: trackCount,
+             disc: disc, discCount: discCount, year: year, bitRate: bitRate, sampleRate: sampleRate,
+             kind: kind, fourCC: fourCC, modificationDate: modificationDate,
+             originalSource: source.url, audioSource: source, aacTransferBitrate: bitrate)
+    }
+
+    var transferPath: String {
+        if let audioSource, let aacTransferBitrate {
+            return SyncEngine.aacTransferPath(audioSource, bitrate: aacTransferBitrate)
+        }
+        return SyncEngine.transferPath(videoTransferURL ?? url, size: size, date: modificationDate, kind: classification)
     }
 
     var matchKey: [String] {

@@ -3,6 +3,94 @@ import Foundation
 import Testing
 @testable import iSyncer
 
+@Test func repeatedIPodPlaysProduceDistinctScrobbles() {
+    let now = 1_800_000_000
+    let track = Track(id: "song.mp3", size: 1, modified: 0, info: TagInfo(), dateAdded: 0)
+    let repeats = LastFM.deviceEntries(for: track, count: 5, latestEvent: now - 60, duration: 180, now: now)
+    #expect(repeats.count == 5)
+    #expect(Set(repeats).count == 5)
+    #expect(repeats.map(\.timestamp) == (0..<5).map { now - 60 - 180 * (5 - $0) })
+    #expect(LastFM.deviceEntries(for: track, count: 0, latestEvent: now - 60, duration: 180, now: now).isEmpty)
+    let oldest = now - 14 * 86_400 + 600
+    let nearCutoff = LastFM.deviceEntries(for: track, count: 5, latestEvent: oldest + 185, duration: 180, now: now)
+    #expect(nearCutoff.count == 5 && Set(nearCutoff).count == 5)
+    #expect(nearCutoff.allSatisfy { $0.timestamp >= oldest })
+    #expect(LastFM.deviceEntries(for: track, count: 5, latestEvent: oldest - 1, duration: 180, now: now).isEmpty)
+}
+
+@Test @MainActor func podcastDownloadLimitKeepsNewerArchiveCopyAndFetchesOnlyMissingSlots() {
+    let base = URL(string: "https://example.org/")!
+    func episode(_ name: String, day: Double) -> PodcastEpisode {
+        PodcastEpisode(title: name, enclosure: base.appending(path: name), fileExtension: "mp3",
+                       publishedAt: Date(timeIntervalSince1970: day * 86_400))
+    }
+    let newest = episode("newest", day: 8)
+    let archived = episode("archive", day: 7)
+    let older = episode("older", day: 5)
+    let copy = PodcastSubscriptions.Download(url: URL(fileURLWithPath: "/archive.mp3"), metadata:
+        PodcastMetadata(feed: base.absoluteString, enclosure: archived.enclosure.absoluteString,
+                        publishedAt: archived.publishedAt), date: .distantPast)
+    let selected = PodcastSubscriptions.downloadWindow(episodes: [newest, older], existing: [copy], limit: 2)
+    #expect(selected == Set([newest, archived].map(\.enclosure.absoluteString)))
+}
+
+@Test func podcastSyncDefaultRespectsExplicitAllAndLegacyCatchUp() {
+    var settings = ClassicSyncSettings()
+    #expect(settings.podcastPolicy(for: "Daily").mode == .useDefault)
+    settings.defaultPodcastLimit = 5
+    #expect(settings.podcastPolicy(for: "Daily").mode == .hardCap)
+    #expect(settings.podcastPolicy(for: "Daily").limit == 5)
+    var all = PodcastRetention()
+    all.select(.all)
+    settings.setPodcastRetention(all, for: "Series")
+    settings.setPodcastRetention(PodcastRetention(limit: 2, unplayedOnly: true), for: "News")
+    #expect(settings.podcastPolicy(for: "Series").mode == .all)
+    #expect(settings.podcastPolicy(for: "News").mode == .catchUp)
+}
+
+@Test func movingConversionCachePreservesFilesAndExcludesThemFromScans() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let support = root.appending(path: "Support")
+    let library = root.appending(path: "Library")
+    let old = ConversionCache(defaultFolder: support, parent: nil)
+    let destination = ConversionCache(defaultFolder: support, parent: library)
+    try fm.createDirectory(at: library.appending(path: "TV/Cache"), withIntermediateDirectories: true)
+    try fm.createDirectory(at: old.audio, withIntermediateDirectories: true)
+    try fm.createDirectory(at: old.video, withIntermediateDirectories: true)
+    let date = Date(timeIntervalSince1970: 1_700_000_000)
+    let video = old.video.appending(path: "Cached.mov")
+    try Data([1]).write(to: video)
+    try fm.setAttributes([.modificationDate: date], ofItemAtPath: video.path)
+    try Data([2]).write(to: old.audio.appending(path: "Cached.m4a"))
+    try Data([3]).write(to: old.audio.appending(path: "Cached.m4a.cover"))
+    try Data([4]).write(to: library.appending(path: "TV/Cache/Real Episode.mov"))
+    try Data([5]).write(to: library.appending(path: "Real Track.m4a"))
+
+    #expect(old.hasFiles)
+    try destination.prepare()
+    #expect(try old.moveFiles(to: destination) == 0)
+    #expect(!old.hasFiles)
+    #expect(try Data(contentsOf: destination.audio.appending(path: "Cached.m4a.cover")) == Data([3]))
+    #expect(try destination.video.appending(path: "Cached.mov").resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate == date)
+    #expect(VideoScanner.scan(root: library).map(\.id) == ["TV/Cache/Real Episode.mov"])
+    #expect(Scanner.scan(root: library, existing: [:]) { _, _ in }.tracks.map(\.id) == ["Real Track.m4a"])
+}
+
+@Test func cacheLocationRejectsAnUnrelatedNonemptyCacheFolder() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let destination = ConversionCache(defaultFolder: root, parent: root)
+    try fm.createDirectory(at: destination.folder, withIntermediateDirectories: true)
+    let userFile = destination.folder.appending(path: "Keep.txt")
+    try Data([1]).write(to: userFile)
+    #expect(throws: CocoaError.self) { try destination.prepare() }
+    #expect(!ConversionCache.isManagedFolder(destination.folder))
+    #expect(try Data(contentsOf: userFile) == Data([1]))
+}
+
 @Test func videoMetadataSurvivesMovingAFileAndDoesNotFollowItsOldName() throws {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)

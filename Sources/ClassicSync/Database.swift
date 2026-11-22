@@ -306,11 +306,11 @@ struct Database {
         }
 
         var tracksByID = Dictionary(uniqueKeysWithValues: tracks.filter { !removedTracks.contains($0.id) }.map { ($0.id, $0) })
-        let videoReplacements = Dictionary(uniqueKeysWithValues: additions.compactMap { entry in
+        let fileReplacements = Dictionary(uniqueKeysWithValues: additions.compactMap { entry in
             entry.replacesTrackID.map { ($0, entry) }
         })
         let updatesVideoTitles = !videoTitles.isEmpty ||
-            videoReplacements.values.contains { $0.song.videoMetadata?.originalTitle != nil }
+            fileReplacements.values.contains { $0.song.videoMetadata?.originalTitle != nil }
         let existingRecords = try (sections.first { $0.kind == 1 }?.records ?? []).compactMap { record -> Data? in
             let index = original.u32(record.offset + 16)
             guard var track = tracksByID[index] else { return nil }
@@ -319,8 +319,11 @@ struct Database {
             let podcast = podcastUpdates[path]
             var replacements = podcast.map { Self.changedPodcastFields($0, on: track) } ?? []
             let artist = artistOverrides[track.path.lowercased()]
-            let video = videoReplacements[index]
-            if let video { replacements.append((2, video.path)) }
+            let video = fileReplacements[index]
+            if let video {
+                replacements.append((2, video.path))
+                if video.song.classification == .music { replacements.append((6, video.song.kind)) }
+            }
             if let description = videoDescriptions[path] ?? video.flatMap({ Self.videoDescription($0.song) }) {
                 replacements.append((14, description))
             }
@@ -348,6 +351,11 @@ struct Database {
                     data.put(video.song.size, at: 0x24)
                     data.put(video.song.duration, at: 0x28)
                     data.put(video.song.bitRate, at: 0x38)
+                    if video.song.classification == .music {
+                        data.replaceSubrange(0x18..<0x1c, with: video.song.fourCC.utf8.reversed())
+                        data.put(video.song.sampleRate << 16, at: 0x3c)
+                        if record.header >= 0x8c { data.put(Int(Float(video.song.sampleRate).bitPattern), at: 0x88) }
+                    }
                     if record.header >= 0x130 { data.put(video.song.size, at: 0x12c) }
                 } else if record.header >= 0x124, replaced.contains(3) || replaced.contains(4) {
                     data.put(try resolveAlbum(track.fields[3] ?? "", track.fields[4] ?? ""), at: 0x120)

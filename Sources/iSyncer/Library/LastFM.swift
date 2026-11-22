@@ -100,6 +100,23 @@ final class LastFM: ObservableObject {
                  duration: Int(t.duration), timestamp: Int(timestamp))
     }
 
+    /// The iPod supplies a repeat count and only the final play's time.
+    nonisolated static func deviceEntries(for track: Track, count: Int, latestEvent: Int,
+                                         duration: Int, now: Int) -> [Scrobble] {
+        let oldest = max(1, now - 14 * 86_400 + 600)
+        guard count > 0, duration >= 30, latestEvent > 0, latestEvent <= now else { return [] }
+        let latestStart = max(1, latestEvent - duration)
+        guard latestStart >= oldest else { return [] }
+        let available = latestStart - oldest
+        let acceptedCount = min(count, available + 1)
+        // Prefer full-track spacing. Compress estimates near the age cutoff so
+        // repeats stay inside the queue's accepted window with distinct times.
+        let spacing = acceptedCount > 1 ? min(duration, available / (acceptedCount - 1)) : 0
+        return (0..<acceptedCount).reversed().map { offset in
+            entry(for: track, at: Double(latestStart - offset * spacing))
+        }
+    }
+
     @discardableResult
     private func add(_ items: [Scrobble]) -> Int {
         let oldest = Int(Date().timeIntervalSince1970) - 14 * 86_400

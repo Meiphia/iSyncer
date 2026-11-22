@@ -169,6 +169,8 @@ public struct SyncItem: Codable, Sendable {
     public let detail: String
     public var sourceURL: URL? = nil
     public var metadataChanges: [SyncMetadataChange]? = nil
+    public var bytesFreed: Int64? = nil
+    public var inProgress: Bool? = nil
     public init(_ action: Action, _ title: String, _ detail: String = "") {
         self.action = action
         self.title = title
@@ -217,12 +219,12 @@ public struct SyncPlan: Sendable {
     public var videoTitleUpdateCount: Int { videoTitles.count }
     public var videoDescriptionUpdateCount: Int { videoDescriptions.count }
     public let repairsPodcastIndex: Bool
-    public var videoReplacementCount: Int { entries.filter { $0.replacesTrackID != nil }.count }
-    public func isVideoReplacement(at index: Int) -> Bool {
+    public var replacementCount: Int { entries.filter { $0.replacesTrackID != nil }.count }
+    public func isReplacement(at index: Int) -> Bool {
         entries.indices.contains(index) && entries[index].replacesTrackID != nil
     }
 
-    public func videoReplacements(inCompletedTransfers count: Int) -> Int {
+    public func replacements(inCompletedTransfers count: Int) -> Int {
         entries.prefix(max(0, count)).filter { $0.replacesTrackID != nil }.count
     }
     public var artworkCandidates: Int { artworkSongs.count }
@@ -352,7 +354,7 @@ public enum SyncEngine {
         let layout = try DeviceLayout(device.mount)
         let (original, database, _) = try load(device, layout: layout)
         let playedOnlyShows = Set(options.podcastLimits.compactMap { $0.value.removePlayed ? $0.key.precomposedStringWithCanonicalMapping : nil })
-        let readsListening = options.expectedListening != nil || !options.existingListening.isEmpty || !options.listening.isEmpty || options.expectedWatchedTVKeys != nil || options.podcastLimits.values.contains(where: \.unplayed)
+        let readsListening = options.expectedListening != nil || !options.existingListening.isEmpty || !options.listening.isEmpty || options.expectedWatchedTVKeys != nil || options.podcastLimits.values.contains { $0.unplayed || $0.hardCap }
         let activePlayLog = layout.database.deletingLastPathComponent().appending(path: "Play Counts")
         let activePlayPlist = activePlayLog.deletingLastPathComponent().appending(path: "PlayCounts.plist")
         let playFiles = !readsListening ? [] : [activePlayLog, activePlayPlist].filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -412,7 +414,7 @@ public enum SyncEngine {
             !($0.podcastMetadata?.enclosure ?? "").isEmpty
         }, by: { $0.podcastMetadata?.enclosure ?? "" })
         let limitedEpisodes = Dictionary(grouping: eligible.filter {
-            $0.classification == .podcast && options.podcastLimits[$0.group] != nil
+            $0.classification == .podcast && options.podcastLimits[$0.group]?.hardCap == false
         }, by: \.group)
         var retained = Set<URL>()
         for (show, episodes) in limitedEpisodes {
@@ -429,7 +431,8 @@ public enum SyncEngine {
         }
         var songs = eligible.filter { song in
             guard options.retrySources?.contains(song.originalSource ?? song.url) ?? true else { return false }
-            return song.classification != .podcast || options.podcastLimits[song.group] == nil || retained.contains(song.id)
+            return song.classification != .podcast || options.podcastLimits[song.group] == nil ||
+                options.podcastLimits[song.group]?.hardCap == true || retained.contains(song.id)
         }
         var known: [[String]: Database.Track] = [:]
         var paths: [String: Database.Track] = [:]
@@ -461,7 +464,7 @@ public enum SyncEngine {
         })
         let occupied = Set(database.tracks.map { $0.path.lowercased() })
         let selectedMusicPaths = Set((songs + options.fillAlbums.flatMap { $0 }).filter { $0.classification == .music }.map {
-            transferPath($0.url, size: $0.size, date: $0.modificationDate, kind: .music).lowercased()
+            $0.transferPath.lowercased()
         })
         func existingTrack(for song: Song, path: String) -> Database.Track? {
             let source = song.originalSource ?? song.url
@@ -484,16 +487,47 @@ public enum SyncEngine {
             let otherEdition = song.classification == .music && candidate.map {
                 $0.path.lowercased() != path.lowercased() &&
                     (selectedMusicPaths.contains($0.path.lowercased()) ||
-                     (options.matchMusicByPath.contains(song.id) && isManagedTransferPath($0.path)))
+                     (options.matchMusicByPath.contains(source) && isManagedTransferPath($0.path)))
             } == true
-            let match = paths[path.lowercased()] ?? (otherEdition ? nil : candidate)
+            let match = paths[path.lowercased()] ?? (song.audioSource != nil || otherEdition ? nil : candidate)
             if let match, let owner = correctedSources[match.id], owner != source { return nil }
             return match
         }
+        // A Mac download limit can be smaller than the iPod limit. Count playable
+        // iPod-only copies in the same release-date window as Mac episodes.
+        let hardCaps = options.podcastLimits.filter { $0.value.hardCap }
+        var hardCapRemovals: [Int: Int] = [:]
+        var hardCapKeep = Set<URL>()
+        let hardCandidates = Dictionary(grouping: podcastCandidates.filter { hardCaps[$0.group] != nil }, by: \.group)
+        let managedPodcasts = Dictionary(grouping: paths.values.filter {
+            $0.mediaType == ClassicMediaKind.podcast.rawValue && isManagedTransferPath($0.path)
+        }, by: { $0.fields[3] ?? "" })
+        for (show, policy) in hardCaps {
+            var devicesByID = Dictionary(uniqueKeysWithValues: (managedPodcasts[show] ?? []).map { ($0.id, $0) })
+            var episodes: [(song: Song?, track: Database.Track?, date: Int, key: String)] = []
+            for song in hardCandidates[show] ?? [] {
+                let track = existingTrack(for: song, path: song.transferPath)
+                if let track { devicesByID.removeValue(forKey: track.id) }
+                let date = Database.releaseTimestamp(song.releaseDate) ?? (track?.releaseTimestamp).flatMap { $0 > 0 ? $0 : nil }
+                    ?? Database.releaseTimestamp(song.modificationDate) ?? 0
+                episodes.append((song, track, date, track?.path ?? song.transferPath))
+            }
+            episodes += devicesByID.values.map { (nil, $0, $0.releaseTimestamp, $0.path) }
+            episodes.sort { $0.date == $1.date ? $0.key < $1.key : $0.date > $1.date }
+            for episode in episodes.prefix(policy.latest) {
+                if let song = episode.song { hardCapKeep.insert(song.id) }
+            }
+            if policy.removeOlder {
+                for episode in episodes.dropFirst(policy.latest) {
+                    if let track = episode.track, isManagedTransferPath(track.path) { hardCapRemovals[track.id] = policy.latest }
+                }
+            }
+        }
+        songs.removeAll { $0.classification == .podcast && hardCaps[$0.group] != nil && !hardCapKeep.contains($0.id) }
         var includesFillTransfers = false
         if !options.fillAlbums.isEmpty {
             func transferCost(_ song: Song) -> Int64 {
-                let path = transferPath(song.url, size: song.size, date: song.modificationDate, kind: song.classification)
+                let path = song.transferPath
                 return existingTrack(for: song, path: path) == nil ? Int64(song.size) + 16_384 : 0
             }
             let available = Int64(try device.mount.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity ?? 0)
@@ -532,7 +566,7 @@ public enum SyncEngine {
                 excludedItems.append(SyncItem(.skip, song.title, "Excluded from sync for this iPod."))
                 continue
             }
-            let path = transferPath(song.url, size: song.size, date: song.modificationDate, kind: song.classification)
+            let path = song.transferPath
             if let existing = existingTrack(for: song, path: path) {
                 let existingPath = existing.path.lowercased()
                 matchedPaths[song.id] = existingPath
@@ -543,10 +577,17 @@ public enum SyncEngine {
                 let needsPodcastArtwork = song.classification == .podcast &&
                     artworkIndex?.artworkOwners[existing.artworkID] != existing.persistentID
                 let isVideo = song.classification == .movie || song.classification == .tvShow
-                let changedCover = options.artwork && song.videoMetadata?.customArtwork == true &&
-                    song.videoMetadata?.artworkData.map { artworkIndex?.matches($0, artworkID: existing.artworkID) != true } == true
+                let changedCover = options.artwork && (
+                    (song.videoMetadata?.customArtwork == true &&
+                     song.videoMetadata?.artworkData.map { artworkIndex?.matches($0, artworkID: existing.artworkID) != true } == true) ||
+                    (song.reviewsMusicArtwork &&
+                     ArtworkWriter.sourceArtwork(for: song).map { artworkIndex?.matches($0, artworkID: existing.artworkID) != true } == true))
                 if options.artwork, isVideo, song.videoMetadata?.customArtwork == true,
                    !song.hasVideoArtwork, existing.artworkID != 0 {
+                    removedVideoArtwork.insert(existingPath)
+                }
+                if options.artwork, song.reviewsMusicArtwork, ArtworkWriter.sourceArtwork(for: song) == nil,
+                   existing.artworkID != 0 {
                     removedVideoArtwork.insert(existingPath)
                 }
                 if options.artwork, !isVideo || song.hasVideoArtwork,
@@ -587,11 +628,26 @@ public enum SyncEngine {
             if planned.insert(lowerPath).inserted {
                 var replacesTrackID: Int?
                 if let previous = song.previousVideoEncoding,
+                   let transferURL = song.videoTransferURL?.deletingLastPathComponent().appendingPathComponent(previous.lastPathComponent),
                    let values = try? previous.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
                    let size = values.fileSize, let date = values.contentModificationDate,
-                   let old = paths[transferPath(previous, size: size, date: date, kind: song.classification).lowercased()],
+                   let old = paths[transferPath(transferURL, size: size, date: date, kind: song.classification).lowercased()],
                    old.mediaType == song.classification.rawValue, replacedTracks.insert(old.id).inserted {
                     replacesTrackID = old.id
+                }
+                if song.classification == .music && (song.audioSource != nil || song.kind == "Apple Lossless audio file") {
+                    let source = song.audioSource ?? AudioTransferSource(url: song.url, size: song.size, date: song.modificationDate)
+                    let alternatives = [transferPath(source.url, size: source.size, date: source.date, kind: .music)] +
+                        AudioTransferSource.aacBitrates.map { aacTransferPath(source, bitrate: $0) }
+                    let previousCopies = alternatives.compactMap { alternate -> Database.Track? in
+                        let alternate = alternate.lowercased()
+                        guard alternate != lowerPath, !selectedMusicPaths.contains(alternate),
+                              let old = paths[alternate], old.mediaType == 0 || old.mediaType == ClassicMediaKind.music.rawValue else { return nil }
+                        return old
+                    }
+                    if previousCopies.count == 1, let old = previousCopies.first, replacedTracks.insert(old.id).inserted {
+                        replacesTrackID = old.id
+                    }
                 }
                 entries.append(.init(song: song, path: path, replacesTrackID: replacesTrackID))
             }
@@ -637,7 +693,7 @@ public enum SyncEngine {
                 !wanted.contains($0.path.lowercased()) && episodeNumbers[$0.path.lowercased()] == nil && isManagedTransferPath($0.path)
         }.map(\.id))
         removedTracks.formUnion(expiredTV)
-        let limitedShows = Set(options.podcastLimits.compactMap { $0.value.removeOlder ? $0.key.precomposedStringWithCanonicalMapping : nil })
+        let limitedShows = Set(options.podcastLimits.compactMap { $0.value.removeOlder && !$0.value.hardCap ? $0.key.precomposedStringWithCanonicalMapping : nil })
         for track in database.tracks {
             let music = track.mediaType == 0 || track.mediaType == ClassicMediaKind.music.rawValue
             let show = (track.fields[3] ?? "").precomposedStringWithCanonicalMapping
@@ -646,9 +702,9 @@ public enum SyncEngine {
             let started = inProgressIDs.contains(track.persistentID)
             let expiredPodcast = limitedShows.contains(show) && (policy?.unplayed != true || (!finished && !started))
             let finishedPodcast = playedOnlyShows.contains(show) && finished
-            let limitedPodcast = track.mediaType == ClassicMediaKind.podcast.rawValue && (expiredPodcast || finishedPodcast)
+            let limitedPodcast = track.mediaType == ClassicMediaKind.podcast.rawValue && (expiredPodcast || finishedPodcast || hardCapRemovals[track.id] != nil)
             guard (music && options.reconcileMusic) || limitedPodcast,
-                  !wanted.contains(track.path.lowercased()), isManagedTransferPath(track.path) else { continue }
+                  !replacedTracks.contains(track.id), !wanted.contains(track.path.lowercased()), isManagedTransferPath(track.path) else { continue }
             removedTracks.insert(track.id)
         }
         let survivingPaths = Set(database.tracks.filter { !removedTracks.contains($0.id) }.map { $0.path.lowercased() })
@@ -684,21 +740,24 @@ public enum SyncEngine {
                 listening[track.path.lowercased()] = state
             }
         }
+        var freedByID: [Int: Int64] = [:]
         let reclaimableBytes = database.tracks.reduce(Int64(0)) { bytes, track in
             let path = track.path.lowercased()
             guard removedTracks.contains(track.id), !survivingPaths.contains(path),
                   countedPaths.insert(path).inserted, let file = layout.trackURL(for: track.path),
                   DeviceLayout.safeFile(file),
                   let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return bytes }
+            freedByID[track.id] = Int64(size)
             return bytes + Int64(size)
         }
         let byID = Dictionary(uniqueKeysWithValues: database.tracks.map { ($0.id, $0) })
         var items = entries.map { entry in
             let song = entry.song
             var item = SyncItem(entry.replacesTrackID == nil ? .add : .replace, song.title,
-                                entry.replacesTrackID == nil ? "No matching media file on this iPod." : "Replace an older iPod video encode.")
+                                entry.replacesTrackID != nil ? "Replace the existing iPod copy." :
+                                    song.aacTransferBitrate.map { "Copy as \($0) kbps AAC." } ?? "No matching media file on this iPod.")
             item.sourceURL = song.originalSource ?? song.url
-            if let id = entry.replacesTrackID, let track = byID[id] {
+            if song.classification != .music, let id = entry.replacesTrackID, let track = byID[id] {
                 let date = Database.releaseTimestamp(song.releaseDate)
                 let description = Database.videoDescription(song)
                 item.metadataChanges = videoChanges(track, title: track.fields[1] == song.title ? nil : song.title,
@@ -740,13 +799,19 @@ public enum SyncEngine {
         }
         items += playlists.map { SyncItem(.metadata, $0.name, "Playlist") }
         items += removedIDs.map { SyncItem(.remove, defaults[$0] ?? existingPlaylists[$0]?.name ?? "Playlist", "Playlist") }
-        items += database.tracks.filter { removedTracks.contains($0.id) }.map {
-            let played = playedIDs.contains($0.persistentID) || playedEnclosures.contains($0.fields[15] ?? "")
-            let reason = expiredTV.contains($0.id) ? "Outside this show’s next unwatched episodes or pinned selection."
-                : options.removedVideoIDs.contains($0.persistentID) ? "Selected for removal."
-                : $0.mediaType == ClassicMediaKind.podcast.rawValue ? (played ? "Played episode excluded by this show’s retention rules." : "Outside this show’s latest episodes.")
-                : "Outside this iPod’s music selection."
-            return SyncItem(.remove, $0.fields[1] ?? "Untitled", reason)
+        items += database.tracks.filter { removedTracks.contains($0.id) }.map { track in
+            let played = playedIDs.contains(track.persistentID) || playedEnclosures.contains(track.fields[15] ?? "")
+            let reason = hardCapRemovals[track.id].map { "Outside the newest \($0) episodes of \(track.fields[3] ?? "this show")." }
+                ?? (expiredTV.contains(track.id) ? "Outside this show’s next unwatched episodes or pinned selection."
+                : options.removedVideoIDs.contains(track.persistentID) ? "Selected for removal."
+                : track.mediaType == ClassicMediaKind.podcast.rawValue ? (played ? "Played episode excluded by this show’s retention rules." : "Outside this show’s latest episodes.")
+                : "Outside this iPod’s music selection.")
+            var item = SyncItem(.remove, track.fields[1] ?? "Untitled", reason)
+            if track.mediaType == ClassicMediaKind.podcast.rawValue {
+                item.bytesFreed = freedByID[track.id] ?? 0
+                item.inProgress = inProgressIDs.contains(track.persistentID)
+            }
+            return item
         }
         items += listening.keys.sorted().compactMap { path in
             guard let next = listening[path] else { return nil }
@@ -809,10 +874,18 @@ public enum SyncEngine {
     public static func transferPath(_ url: URL, size: Int, date: Date, kind: ClassicMediaKind) -> String {
         let suffix = kind == .music ? "" : "\0\(kind.rawValue)"
         let key = "\(url.path)\0\(size)\0\(date.timeIntervalSinceReferenceDate)\(suffix)"
+        let ext = url.pathExtension.lowercased() == "aiff" ? "aif" : url.pathExtension.lowercased()
+        return transferPath(key: key, extension: ext)
+    }
+
+    static func aacTransferPath(_ source: AudioTransferSource, bitrate: Int) -> String {
+        transferPath(key: source.aacIdentity(bitrate: bitrate), extension: "m4a")
+    }
+
+    private static func transferPath(key: String, extension ext: String) -> String {
         let hash = Array(SHA256.hash(data: Data(key.utf8)))
         let stem = "IS" + hash.prefix(6).map { String(format: "%02X", $0) }.joined()
         let bucket = String(format: "F%02d", Int(hash[6]) % 50)
-        let ext = url.pathExtension.lowercased() == "aiff" ? "aif" : url.pathExtension.lowercased()
         return ":iPod_Control:Music:\(bucket):\(stem).\(ext)"
     }
 
@@ -913,8 +986,13 @@ public enum SyncEngine {
             guard let url = layout.trackURL(for: track.path), DeviceLayout.safeFile(url) else { return nil }
             return track.path.lowercased()
         }).union(copied.map { $0.path.lowercased() })
-        let playlists = plan.playlists.map {
-            Database.PlaylistUpdate(id: $0.id, name: $0.name, paths: $0.paths.filter(availablePaths.contains))
+        let oldTracks = Dictionary(uniqueKeysWithValues: database.tracks.map { ($0.id, $0) })
+        let deferredReplacements = Dictionary(uniqueKeysWithValues: plan.entries.dropFirst(copied.count).compactMap { entry in
+            entry.replacesTrackID.flatMap { oldTracks[$0] }.map { (entry.path.lowercased(), $0.path.lowercased()) }
+        })
+        let playlists = plan.playlists.map { playlist in
+            let paths = playlist.paths.map { deferredReplacements[$0] ?? $0 }.filter(availablePaths.contains)
+            return Database.PlaylistUpdate(id: playlist.id, name: playlist.name, paths: paths)
         }
         let writer: ArtworkWriter?
         if !plan.artworkSongs.isEmpty, !stopped {
@@ -1052,7 +1130,6 @@ public enum SyncEngine {
             catch { cleanupIssues.append(SyncItem(.skip, track.fields[1] ?? old.lastPathComponent,
                                                    "Old device file could not be deleted.")) }
         }
-        let prior = Dictionary(uniqueKeysWithValues: database.tracks.map { ($0.id, $0) })
         let completed = Array(plan.items.prefix(copied.count))
         let deferred = plan.entries.dropFirst(copied.count).map {
             var item = SyncItem(.skip, $0.song.title, "Sync stopped before transfer.")
@@ -1060,7 +1137,7 @@ public enum SyncEngine {
             return item
         }
         let metadata = verification.tracks.compactMap { track -> SyncItem? in
-            guard let old = prior[track.id],
+            guard let old = oldTracks[track.id],
                   old.fields.filter({ $0.key != 2 }) != track.fields.filter({ $0.key != 2 }) ||
                   old.releaseTimestamp != track.releaseTimestamp || old.artworkID != track.artworkID ||
                   old.season != track.season || old.episode != track.episode else { return nil }
@@ -1106,7 +1183,8 @@ public enum SyncEngine {
         let values = try song.url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
                                                            .contentModificationDateKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true,
-              values.fileSize == song.size, values.contentModificationDate == song.modificationDate else {
+              values.fileSize == song.size, values.contentModificationDate == song.modificationDate,
+              try song.audioSource?.isCurrent() != false else {
             throw SyncError("\(song.title) changed since the library scan. Rescan the library and try again.")
         }
     }

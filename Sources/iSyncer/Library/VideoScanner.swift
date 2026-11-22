@@ -19,20 +19,26 @@ enum VideoScanner {
         return relativePath.split(separator: "/").dropLast().contains { videoContainers.contains($0.lowercased()) }
     }
 
-    static func scan(root: URL) -> [VideoItem] {
+    static func scan(root: URL, absoluteIDs: Bool = false) -> [VideoItem] {
         let rootPath = root.standardizedFileURL.path
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
                                                      options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         var out: [VideoItem] = []
         for case let url as URL in e {
+            if ConversionCache.isManagedFolder(url) {
+                e.skipDescendants()
+                continue
+            }
             guard extensions.contains(url.pathExtension.lowercased()) else { continue }
             let path = url.standardizedFileURL.path
             guard path.hasPrefix(rootPath + "/") else { continue }
             let rel = String(path.dropFirst(rootPath.count + 1))
-            guard isVideo(rel), let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
-            out.append(parse(rel, size: Int64(v.fileSize ?? 0),
-                             modified: v.contentModificationDate?.timeIntervalSince1970 ?? 0))
+            guard isVideo(root.lastPathComponent + "/" + rel), let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
+            var item = parse(root.lastPathComponent + "/" + rel, size: Int64(v.fileSize ?? 0),
+                             modified: v.contentModificationDate?.timeIntervalSince1970 ?? 0)
+            item.id = absoluteIDs ? path : rel
+            out.append(item)
         }
         return out.sorted { a, b in
             if a.kind != b.kind { return a.kind.rawValue > b.kind.rawValue }   // tv, other, movie
@@ -113,7 +119,7 @@ enum VideoScanner {
         }
         guard showFolders.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
         let currentSeasonFolder = folders.dropFirst(showFolders.count).first
-        let showURL = root.appendingPathComponent(showFolders.joined(separator: "/"))
+        let showURL = root.appendingLibraryPath((video.id.hasPrefix("/") ? "/" : "") + showFolders.joined(separator: "/"))
         let seasonFolder: String
         if let currentSeasonFolder, seasonNumber(currentSeasonFolder) == season {
             seasonFolder = currentSeasonFolder
@@ -136,7 +142,7 @@ enum VideoScanner {
         }
         let targetFolders = season == video.season && seasonNumber(currentSeasonFolder ?? "") == season
             ? folders : showFolders + [seasonFolder]
-        return (targetFolders + ["\(renamed).\(ext)"]).joined(separator: "/")
+        return (video.id.hasPrefix("/") ? "/" : "") + (targetFolders + ["\(renamed).\(ext)"]).joined(separator: "/")
     }
 
     // MARK: Pattern helpers

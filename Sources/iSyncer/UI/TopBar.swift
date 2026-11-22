@@ -30,12 +30,22 @@ struct TopBar: View {
                 Spacer(minLength: 10)
                 LCDDisplay(player: player, library: library, devices: devices)
                     .frame(minWidth: 340, idealWidth: 470, maxWidth: 540)
+                    .contextMenu {
+                        Button("Expanded Now Playing") { browser.showExpandedPlayer = true }
+                    }
                 Spacer(minLength: 10)
                 captioned("Search") { searchField }
                 captioned("Browse") {
                     Button { browser.showColumnBrowser.toggle() } label: { BrowseEye(open: browser.showColumnBrowser) }
                         .buttonStyle(RoundButtonStyle(diameter: 30))
                         .help("Show or hide the column browser")
+                }
+                captioned("Playing") {
+                    Button { browser.showExpandedPlayer.toggle() } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(RoundButtonStyle(diameter: 30))
+                    .help("Expand Now Playing")
                 }
                 captioned("Lyrics") {
                     Button { lyrics.toggle() } label: {

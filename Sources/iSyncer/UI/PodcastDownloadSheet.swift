@@ -8,7 +8,10 @@ struct PodcastDownloadSheet: View {
     @State private var manualRSS = false
     @State private var feedURL = ""
     @ObservedObject var library: LibraryStore
+    var initialFeed: URL? = nil
     @State private var feed: PodcastFeed?
+    @State private var downloaded = Set<URL>()
+    @State private var downloadedOnly = false
     @State private var selection: URL?
     @State private var work: Task<Void, Never>?
     @State private var status = ""
@@ -45,8 +48,30 @@ struct PodcastDownloadSheet: View {
                         Button("Follow") { subscriptions.follow(activeFeed, library: library) }
                     }
                 }
-                List(activeFeed.episodes, selection: $selection) { episode in
-                    Text(episode.title).lineLimit(2).tag(episode.id)
+                if let subscription = subscriptions.shows.first(where: { $0.id == activeFeed.url }) {
+                    downloadOptions(subscription)
+                }
+                Toggle("Downloaded", isOn: $downloadedOnly)
+                    .onChange(of: downloadedOnly) { _, enabled in
+                        if enabled, let selection, !downloaded.contains(selection) { self.selection = nil }
+                    }
+                let episodes = activeFeed.newestFirst.filter { !downloadedOnly || downloaded.contains($0.id) }
+                List(episodes, selection: $selection) { episode in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(episode.title).lineLimit(2)
+                            if let date = episode.publishedAt {
+                                Text(date.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if downloaded.contains(episode.id) {
+                            Label("Downloaded", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.tag(episode.id)
+                }
+                .overlay {
+                    if episodes.isEmpty { Text("No downloaded episodes in this feed").foregroundStyle(.secondary) }
                 }
                 .border(Theme.hex(0xB8B8B8))
             } else if let matches = results, !matches.isEmpty {
@@ -78,18 +103,44 @@ struct PodcastDownloadSheet: View {
                 if feed != nil {
                     Button("Download Episode", action: download)
                         .buttonStyle(PillButtonStyle(prominent: true))
-                        .disabled(work != nil || selection == nil || library.isScanning || library.libraryRoot == nil)
+                        .disabled(work != nil || subscriptions.checking || subscriptions.downloading || DeviceManager.shared.busy ||
+                                  selection == nil || selection.map(downloaded.contains) == true || library.isScanning || library.downloadFolder == nil)
                 }
             }
-            if library.libraryRoot == nil {
+            if library.downloadFolder == nil {
                 Button("Choose Media Library…") { chooseLibraryFolder(library) }
                     .disabled(work != nil)
             }
         }
         .padding(18)
-        .frame(width: 610, height: 400)
+        .frame(width: 610, height: 500)
         .interactiveDismissDisabled(work != nil)
         .onDisappear { work?.cancel() }
+        .onChange(of: subscriptions.checking) { _, checking in if !checking { updateDownloaded() } }
+        .onChange(of: library.libraryFolders) { _, _ in updateDownloaded() }
+        .task { if let initialFeed { loadFeed(initialFeed.absoluteString, subscriptionID: initialFeed) } }
+    }
+
+    private func downloadOptions(_ subscription: PodcastSubscriptions.Subscription) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Toggle("Automatically download episodes", isOn: Binding(
+                get: { subscription.automaticDownloads != false },
+                set: { value in var updated = subscription; updated.automaticDownloads = value; subscriptions.update(updated) }
+            ))
+            Toggle("Limit downloads on this Mac", isOn: Binding(
+                get: { subscription.downloadLimit != nil },
+                set: { value in var updated = subscription; updated.downloadLimit = value ? 20 : nil; subscriptions.update(updated) }
+            ))
+            if let limit = subscription.downloadLimit {
+                Stepper("Keep only the newest \(limit) downloads", value: Binding(
+                    get: { limit },
+                    set: { value in var updated = subscription; updated.downloadLimit = value; subscriptions.update(updated) }
+                ), in: 1...max(100, limit))
+                Text("Older downloads go to the Trash on the next successful check.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(subscriptions.checking || subscriptions.downloading || work != nil)
     }
 
     private func search() {
@@ -104,28 +155,32 @@ struct PodcastDownloadSheet: View {
         }
     }
 
-    private func loadFeed(_ address: String) {
+    private func loadFeed(_ address: String, subscriptionID: URL? = nil) {
         guard work == nil else { return }
         feed = nil
         selection = nil
         start("Loading feed…") {
-            feed = try await PodcastFeed.load(address)
-            selection = feed?.episodes.first?.id
+            let loaded = try await PodcastFeed.load(address)
+            feed = subscriptions.stableFeed(loaded, subscriptionID: subscriptionID)
+            downloadedOnly = false
+            updateDownloaded()
+            selection = feed?.newestFirst.first?.id
             status = ""
         }
     }
 
     private func download() {
-        guard work == nil, let feed, let episode = feed.episodes.first(where: { $0.id == selection }),
-              let root = library.libraryRoot else { return }
+        guard work == nil, let feed, let episode = feed.newestFirst.first(where: { $0.id == selection }) else { return }
         start("Downloading episode…") {
-            try await feed.download(episode, into: root)
-            if library.libraryRoot == root {
-                ArtworkLoader.shared.podcastArtworkChanged()
-                library.scan()
-            }
+            try await subscriptions.download(episode, in: feed, library: library)
+            updateDownloaded()
             status = "Episode saved to the library."
         }
+    }
+
+    private func updateDownloaded() {
+        guard let feed, !library.libraryFolders.isEmpty else { downloaded = []; return }
+        downloaded = Set(library.libraryFolders.flatMap { PodcastSubscriptions.downloads(for: feed, in: $0) }.compactMap { URL(string: $0.metadata.enclosure) })
     }
 
     private func start(_ message: String, action: @escaping @MainActor () async throws -> Void) {

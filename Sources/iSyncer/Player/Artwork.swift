@@ -13,6 +13,12 @@ final class ArtworkLoader: ObservableObject {
     nonisolated static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "bmp", "webp"]
 
     func image(for track: Track) async -> NSImage? {
+        if track.isMusic, let selected = LibraryCollection.shared.selectedArtwork(for: track.classicEditionKey),
+           let image = NSImage(contentsOf: selected) { return image }
+        return await originalImage(for: track)
+    }
+
+    func originalImage(for track: Track) async -> NSImage? {
         guard let url = LibraryStore.shared.url(for: track) else { return nil }
         let key = cacheKey(for: track, url: url)
         if let hit = cache.object(forKey: key as NSString) { return hit }

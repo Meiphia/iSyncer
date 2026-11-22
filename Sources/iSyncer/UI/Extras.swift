@@ -18,8 +18,12 @@ struct AlbumArtworkPane: View {
     @Environment(\.interfaceTextSize) private var textSize
     @ObservedObject var browser: BrowserModel
     var onPlay: () -> Void
+    var controls: AnyView? = nil
 
-    private let columns = [GridItem(.adaptive(minimum: 84, maximum: 110), spacing: 10, alignment: .top)]
+    @AppStorage("albumArtworkSize") private var artworkSize = 76.0
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: artworkSize + 12, maximum: artworkSize + 34), spacing: 10, alignment: .top)]
+    }
 
     var body: some View {
         let isPodcasts = browser.source == .podcasts
@@ -30,6 +34,7 @@ struct AlbumArtworkPane: View {
                 Text(browser.albumSel.isEmpty ? title : "\(title) — show all").font(textSize.font(11))
                 Spacer()
             }
+            .paneHeader()
             .contentShape(Rectangle())
             .onTapGesture { browser.albumSel = [] }
             .overlay(alignment: .trailing) {
@@ -42,15 +47,12 @@ struct AlbumArtworkPane: View {
                     .help("Show albums as a list")
                 }
             }
-            .foregroundStyle(Theme.hex(0x222222))
-            .frame(height: 17 + textSize.extra)
-            .background(Theme.glossyHeader)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.hex(0x8E8E8E)).frame(height: 1) }
+            if let controls { controls }
             ScrollView {
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
                     ForEach(browser.albumSummaries) { a in
                         AlbumTile(album: a, highlighted: browser.albumSel.contains(a.name),
-                                  item: isPodcasts ? "episode" : "song")
+                                  item: isPodcasts ? "episode" : "song", artworkSize: artworkSize)
                             .onTapGesture {
                                 browser.album = browser.album == a.name && NSApp.currentEvent?.clickCount == 1 ? nil : a.name
                                 if NSApp.currentEvent?.clickCount == 2 {
@@ -59,12 +61,33 @@ struct AlbumArtworkPane: View {
                                 }
                             }
                             .help("\(a.name) — double-click to play")
+                            .contextMenu {
+                                if !isPodcasts {
+                                    Button("Artwork Gallery…") { CollectionWindows.gallery(a.first) }
+                                    AlbumQualityMenu(track: a.first)
+                                    Button("Artist Page") {
+                                        browser.source = .artists
+                                        browser.artist = a.first.displayAlbumArtist
+                                    }
+                                }
+                            }
                     }
                 }
                 .padding(10)
             }
             .background(Color.white)
             .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                Image(systemName: "photo").font(.system(size: 9))
+                Slider(value: $artworkSize, in: 56...180, step: 4)
+                    .labelsHidden().frame(maxWidth: 110).controlSize(.mini)
+                    .accessibilityLabel("Album artwork size")
+                Image(systemName: "photo").font(.system(size: 12))
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Theme.glossyHeader)
         }
     }
 }
@@ -75,6 +98,7 @@ struct AlbumTile: View {
     let album: AlbumSummary
     var highlighted = false
     var item = "song"
+    var artworkSize: Double = 76
     @ObservedObject private var artworkLoader = ArtworkLoader.shared
     @State private var image: NSImage?
 
@@ -88,7 +112,7 @@ struct AlbumTile: View {
                     Image(systemName: "music.note").font(.system(size: 22, weight: .ultraLight)).foregroundStyle(Theme.hex(0xAAAAAA))
                 }
             }
-            .frame(width: 76, height: 76)
+            .frame(width: artworkSize, height: artworkSize)
             .clipped()
             .overlay(Rectangle().strokeBorder(highlighted ? Color(nsColor: ITStyle.selectionActive) : Theme.hex(0xBBBBBB),
                                               lineWidth: highlighted ? 2 : 1))
@@ -99,10 +123,10 @@ struct AlbumTile: View {
                   "\(album.count) \(item)\(album.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · "))
                 .font(textSize.font(9)).foregroundStyle(Theme.hex(0x777777)).lineLimit(1)
         }
-        .frame(width: 76)
+        .frame(width: artworkSize)
         .foregroundStyle(Theme.hex(0x222222))
         .contentShape(Rectangle())
-        .task(id: [album.first.id, album.first.podcastShow == nil ? "" : String(artworkLoader.podcastRevision)]) { image = await ArtworkLoader.shared.image(for: album.first) }
+        .task(id: [album.first.id, String(artworkLoader.podcastRevision)]) { image = await ArtworkLoader.shared.image(for: album.first) }
     }
 }
 
@@ -115,7 +139,7 @@ struct PartyShuffleBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text("Source: Library").font(textSize.font(10))
+            Text("Source: Music").font(textSize.font(10))
             Spacer()
             Text("Display").font(textSize.font(10))
             Text("\(party.recentCount) recently played").font(textSize.font(10)).foregroundStyle(Theme.hex(0x666666))

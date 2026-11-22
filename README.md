@@ -29,15 +29,22 @@ iSyncer is a native macOS media library and USB sync app for the iPod Classic ru
 
 [Download the latest release](https://github.com/Meiphia/iSyncer/releases/latest) · [Changelog](CHANGELOG.md)
 
+**Version 1.0** includes multiple library folders, artist pages and artwork galleries, Expanded Now Playing, parallel audio/video conversion, per-album iPod quality, podcast archive management, and library backup/export. See the [1.0 release notes](RELEASE-1.0.0.md) for everything added since 0.6.
+
 ## Get started
 
 1. Download the release ZIP, unzip it, and move `iSyncer.app` to Applications. Builds are ad-hoc signed and unnotarized, so macOS may prompt for approval on first launch. The published app is built for Apple silicon and requires macOS 14 or later.
-2. Open iSyncer and choose **File → Choose Media Library…**. Select the folder that contains your media. iSyncer caches the library and reads audio tags again when files are new or changed. Use **File → Rescan Media Library** after adding files, or **Relink Media Folder…** if you move the collection. The relink preview matches files by their existing relative paths and lists any missing paths before you switch. iSyncer keeps local library history and pauses automatic iPod removals and playlist updates while those files are missing.
-3. For Ogg/Opus playback, audio tag editing, ReplayGain analysis, or automatic conversion of incompatible videos for iPod, install [FFmpeg](https://ffmpeg.org/download.html). With Homebrew, run `brew install ffmpeg`, then restart iSyncer. Playback and sync of compatible media work with the system frameworks. iSyncer looks in standard Homebrew, MacPorts, and PATH locations.
+2. Open iSyncer and choose **File → Add Media Folders…**, or use **Settings → Library**. Add one or more folders containing your media. The Settings folder list provides **Add Folder…**, **Remove**, and **Rescan** controls; removing a folder leaves its files on disk. The first listed folder receives new podcast downloads and imported files. Unavailable folders keep their library entries, and automatic iPod removals pause until those sources return. iSyncer caches the library and reads audio tags again when files are new or changed. Use **File → Rescan Media Library** after adding files, or **Relink Media Folder…** if you move the collection. The relink preview matches files by their existing relative paths and lists any missing paths before you switch. iSyncer keeps local library history and pauses automatic iPod removals and playlist updates while those files are missing.
+3. Packaged builds with FFmpeg include a standalone helper for audio and video conversion, tag editing, Ogg/Opus playback, and ReplayGain. For a build without the helper, install [FFmpeg](https://ffmpeg.org/download.html) and restart iSyncer. iSyncer checks standard Homebrew, MacPorts, and PATH locations.
 
 ## Music library and playback
 
+- **Multiple media folders.** Combine folders on your Mac and external drives in one library. Matching filenames in different sources stay distinct, and playlists can span folders. Open Settings quickly with the cogwheel in the bottom toolbar.
 - **Browse and search.** Filter by genre, album artist, and album, switch between cover art and lists, or use Cover Flow. The sidebar artwork can display the current track or the selected track.
+- **Artist pages.** Select Artists in the sidebar to browse albums chronologically. Link credited names and aliases into a shared artist page with Link Artist Names.
+- **Artwork galleries.** Right-click an album cover and choose Artwork Gallery to collect front covers, back covers, and disc images. Choose a cover for playback and iPod sync. Adjust cover sizes with the slider below the album grid.
+- **Expanded Now Playing.** Click the sidebar artwork or the Playing button to open large artwork, transport controls, queue, and lyrics.
+- **Backup and export.** File → Library Backup & Export saves the library index, playlists, ratings, play history, bookmarks, video metadata, artist links, gallery images, and iPod sync selections. Restore creates a backup of the current setup first. Music and video files are backed up separately. Playlists can also be exported as M3U8 files.
 - **Play and queue.** Use shuffle, repeat, Party Shuffle, and Up Next. The Mini Player has playback controls, a scrubber, ratings, and a cover that opens the album. Playback supports an equalizer, visualizer, ReplayGain, and optional crossfade. Ogg Vorbis and Opus use a local lossless playback cache.
 - **Organize.** Use the bottom-left **+** menu to create a playlist or smart playlist. Reorder playlists and edit built-in lists such as Recently Played and My Top Rated. Right-click a smart playlist to edit it. Combine rules such as Plays is 0 and Date Added is this month, and choose whether to include the list in iPod sync. Check or uncheck tracks to control what is eligible for iPod sync.
 - **Edit and maintain.** Use **Get Info** for metadata and artwork. Audio tag editing rewrites file metadata in stream-copy mode. **Library Health** surfaces duplicates, inconsistent names, mixed albums, missing tags or artwork, and unreadable files. **Import Inbox** lets you review incoming files before adding them.
@@ -45,7 +52,7 @@ iSyncer is a native macOS media library and USB sync app for the iPod Classic ru
 
 ## Videos
 
-The scanner walks the selected library recursively. Movies in a `Movies` or `Films` folder can be named `Title (Year)`. For TV, use a folder structure such as `Videos/TV/Scrubs/Season 1/02. My Mentor.mp4` or an episode filename such as `Scrubs.S01E02.My.Mentor.mkv`. MP4 files must be inside a recognized video folder below the library root. Other supported video extensions, including MKV, M4V, MOV, WebM, and AVI, can be found anywhere under the root.
+The scanner walks the selected library recursively. Movies in a `Movies` or `Films` folder can be named `Title (Year)`. For TV, use a folder structure such as `Videos/TV/Scrubs/Season 1/02. My Mentor.mp4` or an episode filename such as `Scrubs.S01E02.My.Mentor.mkv`. MP4 files must be inside a recognized video folder; a selected folder named TV, Movies, or Videos also counts. Other supported video extensions, including MKV, M4V, MOV, WebM, and AVI, can be found anywhere under the root.
 
 - **Posters** shows movies and TV shows with artwork where available. Open a show for **Up Next**, the season picker, and collapsible episode sections. **List** exposes the column browser, checkboxes, and bulk selection.
 - **Play** opens videos inside iSyncer with fullscreen, scrubbing, and audio or subtitle selection when the file provides those tracks. **Open in Default Player** is available for files the built-in player cannot decode.
@@ -62,13 +69,19 @@ For local podcasts, use a `Podcasts` folder or the Podcast genre. Audiobooks app
 
 iSyncer targets USB-mounted iPod Classics running Apple firmware with a writable, uncompressed, signed `iTunesDB` and a readable FireWire GUID. Settings are saved separately for each iPod.
 
+In **Settings → iPod Sync → On Connection**, enable **Show the iPod when it connects** to bring the running app forward. **Prevent Finder from opening automatically** changes the macOS automatic device-sync preference for your user account. This also affects automatic syncing for iPhones and iPads; manual Finder access remains available. Reconnect after changing it; some macOS versions may require logging out and back in. Effectiveness depends on macOS. Turning the setting off restores the previous preference unless another app has changed it.
+
 1. Connect your iPod, then select it in **Source**. Grant removable-volume access if macOS asks.
-2. In **Music**, choose the entire library or selected playlists, artists, albums, and genres. Selected music can fill remaining space with complete albums and reserve free space for future media.
+2. In **Music**, choose the entire library or selected playlists, artists, albums, and genres. Selected music can fill remaining space with complete albums and reserve free space for future media. To save space, enable **Convert ALAC and FLAC** and pick an AAC bitrate.
 3. Use **Movies**, **TV Shows**, **Podcasts**, and **Audiobooks** to choose what to send. TV can sync individual episodes or seasons, or keep the next *N* unwatched episodes of a show. Podcasts can sync checked, latest, or unplayed episodes. **Catch Up** keeps the newest chosen number of unplayed episodes alongside in-progress and pinned episodes. Removing finished copies from the iPod is a per-show option. TV retention can use watch history from the Mac and iPod.
 4. Click **Preview Sync**, review counts for file copies, removals, metadata and artwork updates, and bookmarks in each direction, then click **Apply**. **View Preview** shows individual changes and bookmark comparisons. Some music and episode selection rules remove previously managed copies from the iPod. View the exact changes before applying.
 5. Click **Eject** when the transfer finishes.
 
-The sync engine matches existing tracks to avoid copying them again when possible. For episodes renumbered in iSyncer, the next sync can update the numbers in place when it recognizes the original iSyncer transfer. It syncs cover artwork and can use Album Artist as Artist in the iPod database so featured artists stay grouped. Common compatible audio includes MP3, AAC-LC, 16-bit ALAC, and 16-bit PCM WAV/AIFF, up to 48 kHz and two channels. Compatible H.264 Baseline video with AAC can be copied directly. With FFmpeg installed, iSyncer converts incompatible selected videos during preview and caches the compatible copies on the Mac.
+The sync engine matches existing tracks to avoid copying them again when possible. For episodes renumbered in iSyncer, the next sync can update the numbers in place when it recognizes the original iSyncer transfer. It syncs cover artwork and can use Album Artist as Artist in the iPod database so featured artists stay grouped. Common compatible audio includes MP3, AAC-LC, 16-bit ALAC, and 16-bit PCM WAV/AIFF, up to 48 kHz and two channels. Compatible H.264 Baseline video with AAC can be copied directly. FFmpeg prepares AAC audio and compatible video copies during preview and caches them on the Mac. **Apply** copies the prepared files to the device. In the iPod **Summary**, adjust **Parallel encoding jobs** to control how many audio and video files iSyncer prepares at once.
+
+Use **Settings → iPod Sync → Choose Folder…** to store prepared files in a `Cache` folder at a different location. You can move existing encodes or leave them where they are. iSyncer skips its conversion cache when scanning the media library.
+
+Under **iPod → Music → Album Quality Overrides**, choose original files or an AAC bitrate for each album edition. You can also right-click a cover and choose **iPod Quality**. AAC conversion applies to ALAC and FLAC sources. Each iPod keeps its own overrides.
 
 **Stop Sync & Save** commits completed transfers. **Last Results** explains what happened and can preview a retry of eligible failed items. **On This iPod** lists device contents and lets you recover selected media to the Mac or review video removals. **Summary** includes play-count import, ratings and listening-progress comparison, and database backups. Backups cover the device index. The restore preview checks that its referenced media files are still available.
 
@@ -97,6 +110,8 @@ swift test
 ./build.sh
 open build/iSyncer.app
 ```
+
+To build a bundle with the FFmpeg helper, see [FFmpeg packaging](Support/FFmpeg/README.md).
 
 For the optional iPod round-trip test, set `ISYNCER_TEST_IPOD` to a compatible iPod mount and `ISYNCER_TEST_MUSIC` to a folder of compatible tagged music. The test reads the original device data and applies writes to a temporary copy. The regular suite also includes synthetic device tests.
 

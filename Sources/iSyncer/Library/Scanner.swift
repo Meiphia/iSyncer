@@ -18,7 +18,7 @@ struct ScanResult: Sendable {
 /// changed files are parsed in parallel.
 enum Scanner {
     static func scan(root: URL, existing: [String: Track], aliases: [String: String] = [:],
-                     progress: @escaping @Sendable (Int, Int) -> Void) -> ScanResult {
+                     absoluteIDs: Bool = false, progress: @escaping @Sendable (Int, Int) -> Void) -> ScanResult {
         let fm = FileManager.default
         let rootPath = root.standardizedFileURL.path
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
@@ -36,13 +36,19 @@ enum Scanner {
         if let e = fm.enumerator(at: root, includingPropertiesForKeys: keys,
                                  options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
             for case let url as URL in e {
+                if ConversionCache.isManagedFolder(url) {
+                    e.skipDescendants()
+                    continue
+                }
                 let ext = url.pathExtension.lowercased()
                 let isAudio = TagReader.audioExtensions.contains(ext)
                 let isPlaylist = TagReader.playlistExtensions.contains(ext)
                 guard isAudio || isPlaylist else { continue }
                 guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
                 if isPlaylist { playlistFiles.append(url); continue }
-                guard let id = relativePath(of: url, rootPath: rootPath), !VideoScanner.isVideo(id) else { continue }
+                guard let relative = relativePath(of: url, rootPath: rootPath),
+                      !VideoScanner.isVideo(root.lastPathComponent + "/" + relative) else { continue }
+                let id = absoluteIDs ? url.standardizedFileURL.path : relative
                 candidates.append(Candidate(
                     id: id,
                     url: url,
@@ -96,18 +102,17 @@ enum Scanner {
         result.tracks = sortCanonical(fresh)
 
         // Playlists found in the library folder.
-        var idsByNormalized = Dictionary(fresh.map { ($0.id.precomposedStringWithCanonicalMapping, $0.id) },
+        var idsByNormalized = Dictionary(fresh.map { (root.appendingLibraryPath($0.id).standardizedFileURL.path.precomposedStringWithCanonicalMapping, $0.id) },
                                          uniquingKeysWith: { a, _ in a })
         for (old, new) in aliases where currentIDs.contains(new) {
-            let key = old.precomposedStringWithCanonicalMapping
+            let key = root.appendingLibraryPath(old).standardizedFileURL.path.precomposedStringWithCanonicalMapping
             if idsByNormalized[key] == nil { idsByNormalized[key] = new }
         }
         for url in playlistFiles.sorted(by: { $0.path < $1.path }) {
             guard let rel = relativePath(of: url, rootPath: rootPath) else { continue }
-            let ids = parseM3U(url, rootPath: rootPath, lookup: idsByNormalized)
-            guard !ids.isEmpty else { continue }
+            let ids = parseM3U(url, lookup: idsByNormalized)
             result.playlists.append(ScannedPlaylist(
-                relativePath: rel,
+                relativePath: absoluteIDs ? url.standardizedFileURL.path : rel,
                 name: url.deletingPathExtension().lastPathComponent,
                 trackIDs: ids))
         }
@@ -138,7 +143,7 @@ enum Scanner {
         return info
     }
 
-    private static func parseM3U(_ url: URL, rootPath: String, lookup: [String: String]) -> [String] {
+    static func parseM3U(_ url: URL, lookup: [String: String]) -> [String] {
         guard let data = try? Data(contentsOf: url) else { return [] }
         let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
         let dir = url.deletingLastPathComponent()
@@ -156,8 +161,7 @@ enum Scanner {
             } else {
                 resolved = dir.appendingPathComponent(line)
             }
-            guard let rel = relativePath(of: resolved, rootPath: rootPath),
-                  let id = lookup[rel.precomposedStringWithCanonicalMapping] else { continue }
+            guard let id = lookup[resolved.standardizedFileURL.path.precomposedStringWithCanonicalMapping] else { continue }
             ids.append(id)
         }
         return ids

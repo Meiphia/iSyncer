@@ -26,6 +26,8 @@ enum Theme {
 
     static let sourceBackground = hex(0xD5DCE6)
     static let sourceHeader = hex(0x6F7A8A)
+    static let paneHeaderHeight: CGFloat = 18
+    static let paneHeaderLine = hex(0x8E8E8E)
     static let selectionTop = hex(0x6D9DE0)
     static let selectionBottom = hex(0x2F6BC9)
 

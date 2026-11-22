@@ -5,18 +5,116 @@ import AppKit
 struct SettingsView: View {
     var body: some View {
         TabView {
+            LibraryFolderSettings().tabItem { Label("Library", systemImage: "folder") }
             AppearanceSettings().tabItem { Label("Appearance", systemImage: "textformat.size") }
             LastFMSettings(lastfm: .shared)
                 .tabItem { Label("Last.fm", systemImage: "dot.radiowaves.left.and.right") }
             DiscordSettings().tabItem { Label("Discord", systemImage: "bubble.left.and.bubble.right") }
             PlaybackSettings()
                 .tabItem { Label("Playback", systemImage: "play.circle") }
+            ConversionCacheSettings()
+                .tabItem { Label("iPod Sync", systemImage: "ipod") }
             TMDBCredits()
                 .padding()
                 .tabItem { Label("Credits", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 560)
+        .frame(width: 640, height: 560)
         .preferredColorScheme(.light)
+    }
+}
+
+@MainActor
+private struct ConversionCacheSettings: View {
+    @ObservedObject private var devices = DeviceManager.shared
+    @AppStorage(DeviceManager.showOnConnectKey) private var showOnConnect = false
+    @ObservedObject private var finder = FinderAutoOpen.shared
+    @State private var pending: ConversionCache?
+    @State private var isMoving = false
+    @State private var status = ""
+    @State private var error: String?
+
+    var body: some View {
+        Form {
+            Section("On Connection") {
+                Toggle("Show the iPod when it connects", isOn: $showOnConnect)
+                Text("Brings iSyncer forward and selects the iPod when the app is running.")
+                    .foregroundStyle(.secondary)
+                Toggle("Prevent Finder from opening automatically", isOn: Binding(
+                    get: { finder.enabled }, set: { value in
+                        do { try finder.setEnabled(value) } catch { self.error = error.localizedDescription }
+                    }))
+                Text("Changes macOS automatic device syncing for this user, including iPhones and iPads. Manual Finder access remains available. Reconnect the device after changing this; some macOS versions may require logging out and back in.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Conversion Cache") {
+                LabeledContent("Location") {
+                    Text(devices.conversionCache.folder.path)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Button("Choose Folder…", action: chooseFolder)
+                    Button("Use Default") { select(parent: nil) }
+                        .disabled(devices.conversionCacheParent == nil)
+                }
+                .disabled(devices.busy || isMoving)
+                Text("iSyncer stores prepared audio and video in a Cache folder inside the location you choose.")
+                    .foregroundStyle(.secondary)
+                if isMoving || !status.isEmpty {
+                    Text(isMoving ? "Updating cache location…" : status)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .alert("Move Existing Cache?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+               presenting: pending) { destination in
+            Button("Move Cache") { change(to: destination, move: true) }
+            Button("Leave Files in Place") { change(to: destination, move: false) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Move the prepared audio and video now to reuse them at the new location.")
+        }
+        .alert("Couldn’t Update Settings", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(error ?? "")
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use This Location"
+        panel.directoryURL = devices.conversionCacheParent ?? LibraryStore.shared.libraryRoot
+        if panel.runModal() == .OK, let url = panel.url { select(parent: url.resolvingSymlinksInPath()) }
+    }
+
+    private func select(parent: URL?) {
+        let current = devices.conversionCache
+        let destination = ConversionCache(defaultFolder: current.defaultFolder, parent: parent)
+        guard current != destination else { return }
+        if current.hasFiles {
+            pending = destination
+        } else {
+            change(to: destination, move: false)
+        }
+    }
+
+    private func change(to destination: ConversionCache, move: Bool) {
+        isMoving = true
+        status = ""
+        Task {
+            defer { isMoving = false }
+            do {
+                let kept = try await devices.changeConversionCache(to: destination, move: move)
+                if kept > 0 { status = "\(kept.formatted()) cache files were kept in the previous location." }
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 

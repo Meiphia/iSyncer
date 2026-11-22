@@ -1,5 +1,6 @@
 .build/
 build/
+/generated_images/
 .DS_Store
 
 # Local tooling and credentials

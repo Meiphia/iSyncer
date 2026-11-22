@@ -73,13 +73,13 @@ struct VideoMetadataStore: Sendable {
         let new = Dictionary(grouping: items.filter { old[FileSignature($0)] != nil }, by: FileSignature.init)
         var locations: [String: URL] = [:]
         for item in items {
-            let url = root.appendingPathComponent(item.id)
+            let url = root.appendingLibraryPath(item.id)
             let currentLegacy = legacyLocation(for: url)
-            let previousLegacy = legacyRoots.map { legacyLocation(for: $0.appendingPathComponent(item.id)) }
+            let previousLegacy = legacyRoots.map { legacyLocation(for: $0.appendingLibraryPath(item.id)) }
             let signature = FileSignature(item)
             let movedLegacy: [URL]
             if let candidates = old[signature], candidates.count == 1, new[signature]?.count == 1 {
-                movedLegacy = ([root] + legacyRoots).map { legacyLocation(for: $0.appendingPathComponent(candidates[0].id)) }
+                movedLegacy = ([root] + legacyRoots).map { legacyLocation(for: $0.appendingLibraryPath(candidates[0].id)) }
             } else {
                 movedLegacy = []
             }
